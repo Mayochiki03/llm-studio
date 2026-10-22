@@ -1,3 +1,4 @@
+import { toast, errText } from "../components/toast";
 import { useEffect, useState } from "react";
 import Topbar from "../components/Topbar";
 import { Card } from "../components/Card";
@@ -24,10 +25,11 @@ export default function Models() {
     api
       .ollamaModels()
       .then((m) => setModels(m.models ?? []))
+      .catch((e) => toast(errText(e), "bad"))
       .finally(() => setLoading(false));
   }
 
-  useEffect(refresh, []);
+  useEffect(() => { refresh(); }, []);
 
   async function doDelete(name: string) {
     if (!confirm(`ลบโมเดล "${name}" ออกจาก Ollama?`)) return;
@@ -35,6 +37,8 @@ export default function Models() {
     try {
       await api.deleteOllamaModel(name);
       refresh();
+    } catch (e) {
+      toast(errText(e), "bad");
     } finally {
       setDeleting(null);
     }

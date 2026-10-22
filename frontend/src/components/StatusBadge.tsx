@@ -2,6 +2,7 @@ import type { JobStatus } from "../types";
 
 const MAP: Record<JobStatus, { label: string; cls: string }> = {
   queued: { label: "รอคิว", cls: "bg-base-700 text-base-200" },
+  scheduled: { label: "ตั้งเวลาไว้", cls: "bg-accent-500/15 text-accent-300" },
   training: { label: "กำลังเทรน", cls: "bg-accent-500/15 text-accent-300 animate-pulse" },
   exporting: { label: "กำลังแปลง GGUF", cls: "bg-accent-500/15 text-accent-300 animate-pulse" },
   creating_ollama: { label: "กำลังสร้างเข้า Ollama", cls: "bg-accent-500/15 text-accent-300 animate-pulse" },

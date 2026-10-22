@@ -3,6 +3,7 @@ import { X, Sparkles, Plus, Trash2, Save, AlertCircle } from "lucide-react";
 import Button from "./Button";
 import { api } from "../api/client";
 import type { QAPair } from "../types";
+import { NumberInput } from "../components/ui";
 
 export default function CustomDatasetDialog({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [aiConfigured, setAiConfigured] = useState<boolean | null>(null);
@@ -98,12 +99,8 @@ export default function CustomDatasetDialog({ onClose, onSaved }: { onClose: () 
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-2 text-xs text-base-400">
                 จำนวนคู่ที่ต้องการ
-                <input
-                  type="number"
-                  value={numPairs}
-                  onChange={(e) => setNumPairs(Number(e.target.value))}
-                  className="w-16 bg-base-850 border border-base-700 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-accent-500"
-                />
+                <NumberInput value={numPairs} onChange={setNumPairs} min={1}
+                  className="w-16 bg-base-850 border border-base-700 rounded-lg px-2 py-1 text-sm focus:outline-none focus:border-accent-500" />
               </div>
               <Button
                 variant="secondary"

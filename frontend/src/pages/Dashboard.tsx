@@ -4,110 +4,99 @@ import Topbar from "../components/Topbar";
 import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
 import StatusBadge from "../components/StatusBadge";
+import { Meter, Notice, Pill, Spinner, timeAgo } from "../components/ui";
 import { api } from "../api/client";
-import type { Job, OllamaModel } from "../types";
-import { FlaskConical, Boxes, ArrowRight, Clock } from "lucide-react";
-
-function timeAgo(ts: number) {
-  const s = Math.max(0, Date.now() / 1000 - ts);
-  if (s < 60) return "เมื่อครู่";
-  if (s < 3600) return `${Math.floor(s / 60)} นาทีที่แล้ว`;
-  if (s < 86400) return `${Math.floor(s / 3600)} ชม.ที่แล้ว`;
-  return `${Math.floor(s / 86400)} วันที่แล้ว`;
-}
+import type { Dashboard as D, Job } from "../types";
+import { FlaskConical, ShieldCheck, BookOpen, Cpu, ArrowRight, Clock, MessageSquare, ListOrdered } from "lucide-react";
 
 export default function Dashboard() {
+  const [d, setD] = useState<D | null>(null);
   const [jobs, setJobs] = useState<Job[]>([]);
-  const [models, setModels] = useState<OllamaModel[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
 
   useEffect(() => {
-    Promise.all([api.listJobs(), api.ollamaModels()])
-      .then(([j, m]) => {
-        setJobs(j);
-        setModels(m.models ?? []);
-      })
-      .finally(() => setLoading(false));
-    const t = setInterval(() => api.listJobs().then(setJobs).catch(() => {}), 4000);
+    const load = () => {
+      api.dashboard().then((x) => { setD(x); setErr(""); }).catch((e) => setErr(e.message));
+      api.listJobs().then(setJobs).catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 4000);
     return () => clearInterval(t);
   }, []);
 
-  const active = jobs.filter((j) => ["training", "exporting", "creating_ollama", "queued"].includes(j.status));
+  if (!d) return (
+    <div className="flex-1 overflow-y-auto">
+      <Topbar title="ภาพรวม" subtitle="สถานะทั้งระบบในที่เดียว" />
+      {err ? <div className="p-8"><Notice tone="bad">โหลดข้อมูลไม่ได้: {err}</Notice></div> : <Spinner />}
+    </div>
+  );
+
+  const gpu = d.hardware.gpu;
+  const running = d.queue?.running ?? null;
+  const waiting = d.queue?.waiting?.length ?? 0;
+  const pending = d.kb.chunks - d.kb.embedded;
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <Topbar title="ภาพรวม" subtitle="สถานะงานเทรนและโมเดลทั้งหมดในที่เดียว" />
-
+      <Topbar title="ภาพรวม" subtitle="สถานะทั้งระบบในที่เดียว" />
       <div className="p-4 md:p-8 space-y-6 max-w-6xl">
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-          <StatTile label="งานที่กำลังทำงาน" value={active.length} accent="accent" />
-          <StatTile label="งานเทรนทั้งหมด" value={jobs.length} accent="base" />
-          <StatTile label="โมเดลใน Ollama" value={models.length} accent="good" />
+        {!d.ollama_up && <Notice tone="bad">เชื่อมต่อ Ollama ไม่ได้ Playground และการสร้างโมเดลจะใช้ไม่ได้ ตรวจว่า Ollama เปิดอยู่และที่อยู่ในตั้งค่าถูกต้อง</Notice>}
+        {pending > 0 && <Notice tone="warn">คลังความรู้มี {pending} ชิ้นที่ยังไม่มีเวกเตอร์ <Link to="/kb" className="underline">ไปสร้างที่หน้าคลังความรู้</Link></Notice>}
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+          <Card className="p-5">
+            <div className="flex items-center gap-2 text-xs text-base-400"><ShieldCheck size={14} /> โมเดลที่ใช้งานจริง</div>
+            <div className="text-sm font-semibold mt-2 break-all">{d.active_model ? d.active_model.name : "ยังไม่มี"}</div>
+            <div className="text-[11px] text-base-500 mt-1">
+              {d.active_model ? `เปิดใช้ ${timeAgo(d.active_model.activated_at)}` : `รอตรวจ ${d.registry_counts.candidate ?? 0} · อนุมัติแล้ว ${d.registry_counts.approved ?? 0}`}
+            </div>
+            <Link to="/registry" className="text-xs text-accent-400 hover:underline mt-2 inline-block">ไปทะเบียนโมเดล</Link>
+          </Card>
+
+          <Card className="p-5">
+            <div className="flex items-center gap-2 text-xs text-base-400"><ListOrdered size={14} /> คิวเทรน</div>
+            <div className="text-sm font-semibold mt-2">{running ? `กำลังเทรน ${running.output_name}` : "ว่าง"}</div>
+            <div className="text-[11px] text-base-500 mt-1">รอคิว {waiting} งาน</div>
+            {running && <Link to={`/jobs/${running.id}`} className="text-xs text-accent-400 hover:underline mt-2 inline-block">ดูความคืบหน้า</Link>}
+          </Card>
+
+          <Card className="p-5">
+            <div className="flex items-center gap-2 text-xs text-base-400"><BookOpen size={14} /> คลังความรู้</div>
+            <div className="text-sm font-semibold mt-2">{d.kb.enabled} เอกสารที่เปิดใช้</div>
+            <div className="text-[11px] text-base-500 mt-1">{d.kb.chunks} ชิ้น · เวกเตอร์ {d.kb.embedded}/{d.kb.chunks}</div>
+            <Link to="/kb" className="text-xs text-accent-400 hover:underline mt-2 inline-block">จัดการความรู้</Link>
+          </Card>
+
+          <Card className="p-5">
+            <div className="flex items-center gap-2 text-xs text-base-400"><Cpu size={14} /> การ์ดจอ</div>
+            {gpu ? (
+              <>
+                <div className="text-sm font-semibold mt-2 truncate">{gpu.name}</div>
+                <div className="mt-2"><Meter pct={(gpu.vram_used_gb / gpu.vram_total_gb) * 100} /></div>
+                <div className="text-[11px] text-base-500 mt-1">VRAM ว่าง {gpu.vram_free_gb} / {gpu.vram_total_gb} GB · ดิสก์ว่าง {d.hardware.disk.free_gb} GB</div>
+              </>
+            ) : <div className="text-sm text-warn mt-2">ไม่พบ GPU</div>}
+          </Card>
         </div>
 
-        <div className="flex flex-col sm:flex-row gap-4">
-          <Link to="/train" className="flex-1">
-            <Card className="p-5 hover:border-accent-500/50 transition-colors cursor-pointer h-full">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-accent-500/15 flex items-center justify-center">
-                    <FlaskConical size={18} className="text-accent-400" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium">เริ่มเทรนโมเดลใหม่</div>
-                    <div className="text-xs text-base-400">เลือกโมเดลพื้นฐาน + dataset แล้วกดเริ่มได้เลย</div>
-                  </div>
-                </div>
-                <ArrowRight size={16} className="text-base-500" />
-              </div>
-            </Card>
-          </Link>
-          <Link to="/models" className="flex-1">
-            <Card className="p-5 hover:border-accent-500/50 transition-colors cursor-pointer h-full">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-good/15 flex items-center justify-center">
-                    <Boxes size={18} className="text-good" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-medium">จัดการโมเดล</div>
-                    <div className="text-xs text-base-400">ทดสอบแชท ลบ หรือดูขนาดไฟล์</div>
-                  </div>
-                </div>
-                <ArrowRight size={16} className="text-base-500" />
-              </div>
-            </Card>
-          </Link>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          <QuickLink to="/train" icon={<FlaskConical size={18} className="text-accent-400" />} bg="bg-accent-500/15" title="เริ่มเทรนโมเดลใหม่" sub="เลือกแบบง่ายแล้วกดเริ่ม" />
+          <QuickLink to="/playground" icon={<MessageSquare size={18} className="text-good" />} bg="bg-good/15" title="ลองถามโมเดล" sub="Playground พร้อมคลังความรู้" />
+          <QuickLink to="/kb" icon={<BookOpen size={18} className="text-warn" />} bg="bg-warn/15" title="เพิ่มความรู้" sub="โมเดลตอบได้ทันทีโดยไม่ต้องเทรน" />
         </div>
 
         <Card>
-          <CardHeader
-            title="งานเทรนล่าสุด"
-            subtitle={loading ? "กำลังโหลด..." : `${jobs.length} งานทั้งหมด`}
-            action={
-              <Link to="/train">
-                <Button variant="secondary" className="text-xs py-1.5">
-                  <FlaskConical size={14} /> งานใหม่
-                </Button>
-              </Link>
-            }
-          />
+          <CardHeader title="งานเทรนล่าสุด" subtitle={`${jobs.length} งานทั้งหมด`}
+            action={<Link to="/train"><Button variant="secondary" className="text-xs py-1.5"><FlaskConical size={14} /> งานใหม่</Button></Link>} />
           <div className="border-t border-base-800">
-            {jobs.length === 0 && !loading && (
-              <div className="px-5 py-10 text-center text-sm text-base-500">
-                ยังไม่มีงานเทรน — กด "งานใหม่" เพื่อเริ่มต้น
-              </div>
-            )}
+            {jobs.length === 0 && <div className="px-5 py-10 text-center text-sm text-base-500">ยังไม่มีงานเทรน กด "งานใหม่" เพื่อเริ่มต้น</div>}
             {jobs.slice(0, 8).map((j) => (
-              <Link
-                to={`/jobs/${j.id}`}
-                key={j.id}
-                className="flex items-center justify-between px-5 py-3.5 border-b border-base-800 last:border-0 hover:bg-base-850 transition-colors"
-              >
+              <Link to={`/jobs/${j.id}`} key={j.id} className="flex items-center justify-between gap-3 px-5 py-3.5 border-b border-base-800 last:border-0 hover:bg-base-850 transition-colors">
                 <div className="min-w-0">
                   <div className="text-sm font-medium truncate">{j.output_name}</div>
-                  <div className="text-xs text-base-500 flex items-center gap-1.5 mt-0.5">
+                  <div className="text-xs text-base-500 flex items-center gap-1.5 mt-0.5 flex-wrap">
                     <Clock size={11} /> {timeAgo(j.updated_at)} · {j.base_model.split("/").pop()}
+                    {j.status === "scheduled" && j.start_at && <Pill tone="info">เริ่ม {new Date(j.start_at * 1000).toLocaleString("th-TH", { dateStyle: "short", timeStyle: "short" })}</Pill>}
                   </div>
                 </div>
                 <StatusBadge status={j.status} />
@@ -120,20 +109,21 @@ export default function Dashboard() {
   );
 }
 
-function StatTile({
-  label,
-  value,
-  accent,
-}: {
-  label: string;
-  value: number;
-  accent: "accent" | "good" | "base";
-}) {
-  const color = accent === "accent" ? "text-accent-400" : accent === "good" ? "text-good" : "text-base-100";
+function QuickLink({ to, icon, bg, title, sub }: { to: string; icon: React.ReactNode; bg: string; title: string; sub: string }) {
   return (
-    <Card className="px-5 py-4">
-      <div className="text-xs text-base-400">{label}</div>
-      <div className={`text-2xl font-semibold mt-1 ${color}`}>{value}</div>
-    </Card>
+    <Link to={to}>
+      <Card className="p-5 hover:border-accent-500/50 transition-colors h-full">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
+            <div className={`w-10 h-10 rounded-lg ${bg} flex items-center justify-center shrink-0`}>{icon}</div>
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{title}</div>
+              <div className="text-xs text-base-400">{sub}</div>
+            </div>
+          </div>
+          <ArrowRight size={16} className="text-base-500 shrink-0" />
+        </div>
+      </Card>
+    </Link>
   );
 }

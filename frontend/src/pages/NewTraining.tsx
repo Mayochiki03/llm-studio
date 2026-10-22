@@ -3,13 +3,36 @@ import { useNavigate, Link } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import { Card } from "../components/Card";
 import Button from "../components/Button";
-import { api } from "../api/client";
-import type { BaseModel, DatasetOption } from "../types";
-import { Check, Cpu, Database, Sliders, Rocket, AlertTriangle, Plus, Trash2, X, Search, Sparkles } from "lucide-react";
+import { api, ApiError } from "../api/client";
+import type { BaseModel, DatasetOption, Hardware, PiiScan, PreflightResult } from "../types";
+import { Check, Cpu, Database, Sliders, Rocket, AlertTriangle, Plus, Trash2, X, Search, Sparkles, Zap, Scale, Gem, CalendarClock } from "lucide-react";
+import { Meter, Modal, NumberInput, Notice, Pill, TextArea, Toggle, inputCls } from "../components/ui";
+import { PiiSummary } from "./Datasets";
+import { toast, errText } from "../components/toast";
 import SearchHFDialog from "../components/SearchHFDialog";
 import CustomDatasetDialog from "../components/CustomDatasetDialog";
 
-const STEPS = ["โมเดลพื้นฐาน", "ชุดข้อมูล", "พารามิเตอร์", "ตรวจสอบ"];
+const STEPS = ["โมเดลพื้นฐาน", "ชุดข้อมูล", "ตั้งค่าการเทรน", "ตรวจและเริ่ม"];
+
+// ชุดค่าสำเร็จรูป: เลือกอันเดียวแทนการปรับเลขเอง (batch/accum ปล่อยให้ระบบเลือกตามการ์ดจอ)
+interface Preset {
+  id: string;
+  label: string;
+  icon: typeof Zap;
+  desc: string;
+  time: string;
+  r: number;
+  epochs: number;
+  seq: number;
+  sample: number;
+  lr: number;
+  val: number;
+}
+const PRESETS: Preset[] = [
+  { id: "quick", label: "ทดลองเร็ว", icon: Zap, desc: "เช็คว่าระบบและข้อมูลใช้ได้ ผลยังไม่ละเอียด", time: "ประมาณ 10-30 นาที", r: 8, epochs: 1, seq: 512, sample: 500, lr: 2e-4, val: 0 },
+  { id: "balanced", label: "สมดุล (แนะนำ)", icon: Scale, desc: "คุณภาพกับเวลาพอดีสำหรับใช้งานทั่วไป", time: "ประมาณ 1-3 ชม.", r: 16, epochs: 2, seq: 1024, sample: 2000, lr: 2e-4, val: 0.1 },
+  { id: "quality", label: "คุณภาพสูง", icon: Gem, desc: "ข้อมูลยาว เรียนละเอียด ต้องใช้การ์ดจอใหญ่", time: "ประมาณ 3-8 ชม.", r: 32, epochs: 3, seq: 2048, sample: 5000, lr: 1e-4, val: 0.1 },
+];
 
 export default function NewTraining() {
   const nav = useNavigate();
@@ -25,6 +48,21 @@ export default function NewTraining() {
   const [maxSeqLength, setMaxSeqLength] = useState(512);
   const [epochs, setEpochs] = useState(1);
   const [sampleSize, setSampleSize] = useState(2000);
+  const [mode, setMode] = useState<"easy" | "adv">("easy");
+  const [presetId, setPresetId] = useState("balanced");
+  const [lr, setLr] = useState(2e-4);
+  const [batchSize, setBatchSize] = useState(0);
+  const [gradAccum, setGradAccum] = useState(0);
+  const [packing, setPacking] = useState(false);
+  const [valRatio, setValRatio] = useState(0.1);
+  const [templateMode, setTemplateMode] = useState<"auto" | "legacy">("auto");
+  const [systemPrompt, setSystemPrompt] = useState("");
+  const [maxMinutes, setMaxMinutes] = useState(0);
+  const [startAt, setStartAt] = useState("");
+  const [hw, setHw] = useState<Hardware | null>(null);
+  const [pf, setPf] = useState<PreflightResult | null>(null);
+  const [pfBusy, setPfBusy] = useState(false);
+  const [gate, setGate] = useState<null | { kind: "pii"; scan: PiiScan; msg: string } | { kind: "preflight"; pf: PreflightResult; msg: string }>(null);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [showAddModel, setShowAddModel] = useState(false);
@@ -36,20 +74,59 @@ export default function NewTraining() {
     api.baseModels().then((m) => {
       setBaseModels(m);
       setBaseModel((prev) => (m.some((x) => x.id === prev) ? prev : m.find((x) => x.recommended)?.id ?? m[0]?.id ?? ""));
-    });
+    }).catch(() => {});
   }
 
   function loadDatasets() {
     api.datasets().then((d) => {
       setDatasets(d);
       setDataset((prev) => (d.some((x) => x.id === prev) ? prev : d[0]?.id ?? ""));
-    });
+    }).catch(() => {});
   }
 
   useEffect(() => {
     loadModels();
     loadDatasets();
+    api.hardware().then(setHw).catch(() => {});
   }, []);
+
+  const vram = hw?.gpu?.vram_total_gb ?? 0;
+
+  // ใช้ชุดค่าสำเร็จรูป: การ์ดเล็ก (<6GB) ลดความยาวข้อความสูงสุดเหลือ 512 เพื่อไม่ให้หน่วยความจำเต็ม
+  function applyPreset(id: string) {
+    const p = PRESETS.find((x) => x.id === id);
+    if (!p) return;
+    setPresetId(id);
+    setR(p.r);
+    setLoraAlpha(p.r);
+    setEpochs(p.epochs);
+    setMaxSeqLength(vram > 0 && vram < 6 ? Math.min(p.seq, 512) : p.seq);
+    setSampleSize(p.sample);
+    setLr(p.lr);
+    setValRatio(p.val);
+    setBatchSize(0);
+    setGradAccum(0);
+    setPacking(false);
+  }
+
+  // ตั้งค่าเริ่มต้นตามการ์ดจอครั้งเดียวหลังรู้ VRAM
+  useEffect(() => {
+    if (hw) applyPreset(vram >= 20 ? "balanced" : vram > 0 && vram < 6 ? "quick" : "balanced");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hw]);
+
+  // เข้าขั้นตอนสุดท้าย (หรือเปลี่ยนค่า) แล้วประเมินทรัพยากรให้ทันที
+  useEffect(() => {
+    if (step !== 3 || !baseModel) return;
+    setPfBusy(true);
+    const t = setTimeout(() => {
+      api.preflight({ base_model: baseModel, max_seq_length: maxSeqLength, batch_size: batchSize || undefined })
+        .then(setPf)
+        .catch(() => setPf(null))
+        .finally(() => setPfBusy(false));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [step, baseModel, maxSeqLength, batchSize]);
 
   async function removeModel(id: string) {
     if (!confirm("เอาโมเดลนี้ออกจากรายการ? (ไม่ได้ลบไฟล์จริงบนเครื่อง แค่เอาออกจากลิสต์ให้เลือก)")) return;
@@ -78,9 +155,10 @@ export default function NewTraining() {
   const selectedBase = baseModels.find((m) => m.id === baseModel);
   const canGoNext = step === 0 ? !!baseModel : step === 1 ? !!dataset : step === 2 ? !!outputName.trim() : true;
 
-  async function startTraining() {
+  async function startTraining(opts: { pii_ack?: boolean; force?: boolean } = {}) {
     setSubmitting(true);
     setErr(null);
+    setGate(null);
     try {
       const job = await api.createJob({
         base_model: baseModel,
@@ -91,10 +169,30 @@ export default function NewTraining() {
         max_seq_length: maxSeqLength,
         num_train_epochs: epochs,
         sample_size: sampleSize,
+        preset: mode === "easy" ? presetId : "custom",
+        batch_size: batchSize,
+        grad_accum: gradAccum,
+        learning_rate: lr,
+        packing,
+        val_ratio: valRatio,
+        system_prompt: systemPrompt,
+        template_mode: templateMode,
+        start_at: startAt ? Math.floor(new Date(startAt).getTime() / 1000) : null,
+        max_minutes: maxMinutes,
+        ...opts,
       });
+      toast(job.status === "scheduled" ? "ตั้งเวลาเริ่มเทรนแล้ว" : "เข้าคิวเทรนแล้ว");
       nav(`/jobs/${job.id}`);
     } catch (e: any) {
-      setErr(e.message ?? "เริ่มงานไม่สำเร็จ");
+      // 409 = ด่านตรวจไม่ผ่าน (ข้อมูลระบุตัวตน / ทรัพยากรไม่พอ) ให้ผู้ใช้เห็นรายละเอียดแล้วตัดสินใจเอง
+      if (e instanceof ApiError && e.status === 409 && e.detail?.code === "pii") {
+        setGate({ kind: "pii", scan: e.detail.scan, msg: e.detail.message });
+      } else if (e instanceof ApiError && e.status === 409 && e.detail?.code === "preflight") {
+        setGate({ kind: "preflight", pf: e.detail.preflight, msg: e.detail.message });
+      } else {
+        setErr(errText(e));
+      }
+    } finally {
       setSubmitting(false);
     }
   }
@@ -184,16 +282,13 @@ export default function NewTraining() {
               </div>
             ))}
 
-            {selectedBase && selectedBase.vramFitGb > 4 && (
+            {selectedBase && vram > 0 && selectedBase.vramFitGb > vram && (
               <div className="flex items-start gap-2 text-xs text-warn bg-warn/10 border border-warn/20 rounded-lg px-3 py-2.5 mt-2">
                 <AlertTriangle size={14} className="mt-0.5 shrink-0" />
                 <span>
-                  โมเดลนี้ต้องการ VRAM มากกว่า 4GB การเทรนบนเครื่อง local (การ์ด 4GB) อาจไม่สำเร็จ — ระบบจะยังสร้างสคริปต์เทรนให้ แต่แนะนำให้เอาไปรันบน Colab แทน
-                  พอได้ไฟล์ GGUF กลับมาแล้ว ไปที่หน้า{" "}
-                  <Link to="/import" className="underline text-warn hover:text-warn/80">
-                    "นำเข้าโมเดล"
-                  </Link>{" "}
-                  เพื่อดึงเข้า Ollama โดยไม่ต้องใช้ cmd
+                  โมเดลนี้ต้องการ VRAM ประมาณ {selectedBase.vramFitGb} GB แต่เครื่องนี้มี {vram} GB อาจเทรนไม่สำเร็จ ขั้นตอนสุดท้ายระบบจะตรวจให้อีกครั้ง
+                  หรือเอาไปเทรนบน Colab/เซิร์ฟเวอร์แล้วนำเข้าที่หน้า{" "}
+                  <Link to="/import" className="underline text-warn hover:text-warn/80">"นำเข้าโมเดล"</Link>
                 </span>
               </div>
             )}
@@ -259,12 +354,7 @@ export default function NewTraining() {
             ))}
             <div className="pt-2">
               <label className="text-xs text-base-400 block mb-1.5">จำนวนตัวอย่างที่จะใช้ (sample size)</label>
-              <input
-                type="number"
-                value={sampleSize}
-                onChange={(e) => setSampleSize(Number(e.target.value))}
-                className="w-full bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-500"
-              />
+              <NumberInput value={sampleSize} onChange={setSampleSize} min={1} />
               <p className="text-[11px] text-base-500 mt-1">เริ่มจากน้อยๆ (1,000-2,000) เพื่อทดลองเร็ว ค่อยเพิ่มทีหลังได้ — ถ้าเป็นชุดข้อมูล "ของฉัน" ที่มีไม่กี่ตัวอย่าง ใส่ตัวเลขสูงไว้ได้เลย ระบบจะใช้เท่าที่มีจริง</p>
             </div>
           </Card>
@@ -287,52 +377,146 @@ export default function NewTraining() {
         )}
 
         {step === 2 && (
-          <Card className="p-5 space-y-4">
-            <div className="flex items-center gap-2 text-sm font-medium mb-1">
-              <Sliders size={16} className="text-accent-400" /> พารามิเตอร์การเทรน
+          <Card className="p-5 space-y-5">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-2 text-sm font-medium">
+                <Sliders size={16} className="text-accent-400" /> ตั้งค่าการเทรน
+              </div>
+              <div className="flex gap-1 bg-base-850 rounded-lg p-1">
+                {([["easy", "แบบง่าย"], ["adv", "ขั้นสูง"]] as const).map(([k, l]) => (
+                  <button key={k} onClick={() => setMode(k)} className={`px-3 py-1.5 rounded-md text-xs ${mode === k ? "bg-base-700 text-base-100" : "text-base-400"}`}>{l}</button>
+                ))}
+              </div>
             </div>
-            <Field label="ชื่อโมเดลผลลัพธ์ (output folder)">
-              <input
-                value={outputName}
-                onChange={(e) => setOutputName(e.target.value)}
-                className="w-full bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-500"
-              />
+
+            <Field label="ชื่อโมเดลผลลัพธ์" hint="ตั้งให้จำง่าย เช่น sud-followup-v2 (ใช้เป็นชื่อใน Ollama ด้วย)">
+              <input value={outputName} onChange={(e) => setOutputName(e.target.value)} className={inputCls} />
             </Field>
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="LoRA r" hint="ยิ่งสูงยิ่งจำรายละเอียดได้มาก แต่กิน VRAM เพิ่ม">
-                <NumberInput value={r} onChange={setR} />
-              </Field>
-              <Field label="LoRA alpha" hint="ปกติตั้งเท่ากับ r">
-                <NumberInput value={loraAlpha} onChange={setLoraAlpha} />
-              </Field>
-              <Field label="max_seq_length" hint="4GB VRAM แนะนำ 512">
-                <NumberInput value={maxSeqLength} onChange={setMaxSeqLength} step={128} />
-              </Field>
-              <Field label="epochs">
-                <NumberInput value={epochs} onChange={setEpochs} step={1} />
-              </Field>
-            </div>
+
+            {mode === "easy" && (
+              <>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {PRESETS.map((p) => (
+                    <button key={p.id} onClick={() => applyPreset(p.id)}
+                      className={`text-left p-4 rounded-lg border transition-colors ${presetId === p.id ? "border-accent-500 bg-accent-500/5" : "border-base-800 hover:border-base-700"}`}>
+                      <p.icon size={18} className={presetId === p.id ? "text-accent-400" : "text-base-500"} />
+                      <div className="text-sm font-medium mt-2">{p.label}</div>
+                      <p className="text-xs text-base-400 mt-1">{p.desc}</p>
+                      <p className="text-[11px] text-base-500 mt-2">{p.time} (บนการ์ดระดับกลาง)</p>
+                    </button>
+                  ))}
+                </div>
+                <p className="text-[11px] text-base-500">
+                  ระบบเลือก batch size และตัวเร่งความเร็วให้เองตามการ์ดจอ{hw?.gpu ? ` (${hw.gpu.name}, ${hw.gpu.vram_total_gb} GB)` : ""}
+                  {vram > 0 && vram < 6 && " · การ์ดนี้เล็ก จึงจำกัดความยาวข้อความไว้ที่ 512"}
+                </p>
+              </>
+            )}
+
+            {mode === "adv" && (
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="LoRA r" hint="ยิ่งสูงยิ่งจำรายละเอียดได้มาก แต่กิน VRAM เพิ่ม"><NumberInput value={r} onChange={setR} /></Field>
+                  <Field label="LoRA alpha" hint="ปกติตั้งเท่ากับ r"><NumberInput value={loraAlpha} onChange={setLoraAlpha} /></Field>
+                  <Field label="max_seq_length" hint="การ์ด 4GB แนะนำ 512"><NumberInput value={maxSeqLength} onChange={setMaxSeqLength} step={128} /></Field>
+                  <Field label="epochs" hint="จำนวนรอบที่อ่านข้อมูลทั้งชุด"><NumberInput value={epochs} onChange={setEpochs} /></Field>
+                  <Field label="learning rate" hint="ปกติ 0.0002 ถ้าค่า loss แกว่งให้ลดลง"><NumberInput value={lr} onChange={setLr} step={0.00005} /></Field>
+                  <Field label="สัดส่วนข้อมูลตรวจสอบ" hint="0.1 = กันไว้ 10% เพื่อดูว่าโมเดลท่องจำหรือไม่ ใส่ 0 เพื่อปิด"><NumberInput value={valRatio} onChange={setValRatio} step={0.05} /></Field>
+                  <Field label="batch size" hint="0 = ระบบเลือกให้ตามการ์ดจอ"><NumberInput value={batchSize} onChange={setBatchSize} /></Field>
+                  <Field label="gradient accumulation" hint="0 = ระบบเลือกให้"><NumberInput value={gradAccum} onChange={setGradAccum} /></Field>
+                </div>
+                <Toggle checked={packing} onChange={setPacking} label="Packing (ยัดหลายตัวอย่างในหนึ่งชุด)" hint="เร็วขึ้นมากถ้าตัวอย่างสั้น แต่เป็นตัวเลือกทดลอง ทดสอบกับข้อมูลเล็กก่อน" />
+                <Toggle checked={templateMode === "legacy"} onChange={(v) => setTemplateMode(v ? "legacy" : "auto")}
+                  label="ใช้รูปแบบ prompt แบบเดิม (Gemma)" hint="ปกติปล่อยปิด ระบบใช้รูปแบบของโมเดลนั้นเอง เปิดเฉพาะถ้าผลเทรนแบบอัตโนมัติผิดปกติ หรือต้องการให้เหมือนโมเดลรุ่นก่อน" />
+                <Field label="System prompt สำหรับข้อมูลชุดนี้" hint="เว้นว่าง = ใช้ค่าเริ่มต้นจากหน้าตั้งค่า">
+                  <TextArea rows={3} value={systemPrompt} onChange={(e) => setSystemPrompt(e.target.value)} />
+                </Field>
+                <div className="grid grid-cols-2 gap-4">
+                  <Field label="จำนวนตัวอย่างที่ใช้"><NumberInput value={sampleSize} onChange={setSampleSize} step={100} /></Field>
+                  <Field label="เวลาสูงสุด (นาที)" hint="0 = ตามค่าในหน้าตั้งค่า"><NumberInput value={maxMinutes} onChange={setMaxMinutes} step={30} /></Field>
+                </div>
+              </div>
+            )}
+
+            <Field label="ตั้งเวลาเริ่ม (ไม่บังคับ)" hint="เว้นว่าง = เข้าคิวและเริ่มทันทีที่การ์ดจอว่าง เหมาะกับสั่งตอนเย็นให้เริ่มตอนกลางคืน">
+              <div className="flex items-center gap-2">
+                <CalendarClock size={16} className="text-base-500 shrink-0" />
+                <input type="datetime-local" value={startAt} onChange={(e) => setStartAt(e.target.value)} className={inputCls} />
+              </div>
+            </Field>
           </Card>
         )}
 
         {step === 3 && (
           <Card className="p-5 space-y-4">
             <div className="flex items-center gap-2 text-sm font-medium mb-1">
-              <Rocket size={16} className="text-accent-400" /> ตรวจสอบก่อนเริ่ม
+              <Rocket size={16} className="text-accent-400" /> ตรวจก่อนเริ่ม
             </div>
             <dl className="divide-y divide-base-800 text-sm">
               <Row k="โมเดลพื้นฐาน" v={selectedBase?.label ?? baseModel} />
               <Row k="ชุดข้อมูล" v={datasets.find((d) => d.id === dataset)?.label ?? dataset} />
               <Row k="จำนวนตัวอย่าง" v={sampleSize.toLocaleString()} />
               <Row k="ชื่อผลลัพธ์" v={outputName} />
+              <Row k="แบบ" v={mode === "easy" ? PRESETS.find((p) => p.id === presetId)?.label ?? presetId : "ขั้นสูง"} />
               <Row k="r / alpha" v={`${r} / ${loraAlpha}`} />
               <Row k="max_seq_length" v={String(maxSeqLength)} />
               <Row k="epochs" v={String(epochs)} />
+              {startAt && <Row k="เริ่มเมื่อ" v={new Date(startAt).toLocaleString("th-TH", { dateStyle: "medium", timeStyle: "short" })} />}
             </dl>
-            {err && (
-              <div className="text-xs text-bad bg-bad/10 border border-bad/20 rounded-lg px-3 py-2.5">{err}</div>
-            )}
+
+            <div className="border border-base-800 rounded-lg p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium">ความพร้อมของเครื่อง</div>
+                {pfBusy ? <span className="text-xs text-base-500">กำลังตรวจ...</span> : pf && (
+                  <Pill tone={pf.level === "ok" ? "good" : pf.level === "tight" ? "warn" : "bad"}>{pf.summary}</Pill>
+                )}
+              </div>
+              {pf && (
+                <>
+                  {pf.checks.map((c) => (
+                    <div key={c.key} className="space-y-1">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className={`w-2 h-2 rounded-full ${c.level === "ok" ? "bg-good" : c.level === "tight" ? "bg-warn" : "bg-bad"}`} />
+                        <span className="text-base-200">{c.title}</span>
+                      </div>
+                      <p className="text-[11px] text-base-400 pl-4">{c.detail}</p>
+                    </div>
+                  ))}
+                  {pf.checks.find((c) => c.key === "vram") && hw?.gpu && (
+                    <Meter pct={(pf.vram_need_gb / hw.gpu.vram_total_gb) * 100} />
+                  )}
+                  <p className="text-[11px] text-base-500">
+                    ระบบจะใช้ batch {pf.batch_used}{batchSize ? " (ที่คุณกำหนด)" : " (เลือกให้ตามการ์ดจอ)"}
+                    {pf.recommended.note ? ` · ${pf.recommended.note}` : ""}
+                  </p>
+                </>
+              )}
+            </div>
+            {err && <Notice tone="bad">{err}</Notice>}
           </Card>
+        )}
+
+        {gate?.kind === "pii" && (
+          <Modal title="พบข้อมูลที่อาจระบุตัวตนได้" onClose={() => setGate(null)}
+            footer={<>
+              <Button variant="ghost" onClick={() => setGate(null)}>กลับไปแก้ข้อมูล</Button>
+              <Button variant="danger" onClick={() => startTraining({ pii_ack: true })}>ยืนยันว่าเป็นข้อมูลสมมติ แล้วเริ่มเทรน</Button>
+            </>}>
+            <p className="text-sm text-base-300">{gate.msg}</p>
+            <PiiSummary scan={gate.scan} />
+          </Modal>
+        )}
+        {gate?.kind === "preflight" && (
+          <Modal title="เครื่องอาจไม่พอสำหรับงานนี้" onClose={() => setGate(null)}
+            footer={<>
+              <Button variant="ghost" onClick={() => setGate(null)}>กลับไปปรับค่า</Button>
+              <Button variant="danger" onClick={() => startTraining({ force: true })}>ฝืนเริ่ม (เสี่ยงล้มเหลว)</Button>
+            </>}>
+            <p className="text-sm text-base-300">{gate.msg}</p>
+            {gate.pf.checks.filter((c) => c.level !== "ok").map((c) => (
+              <Notice key={c.key} tone={c.level === "no" ? "bad" : "warn"}><b>{c.title}</b><div>{c.detail}</div></Notice>
+            ))}
+          </Modal>
         )}
 
         <div className="flex justify-between pt-2">
@@ -344,8 +528,8 @@ export default function NewTraining() {
               ถัดไป
             </Button>
           ) : (
-            <Button onClick={startTraining} disabled={submitting}>
-              {submitting ? "กำลังเริ่ม..." : "เริ่มเทรน"} <Rocket size={15} />
+            <Button onClick={() => startTraining()} disabled={submitting || !outputName.trim()}>
+              {submitting ? "กำลังส่งเข้าคิว..." : startAt ? "ตั้งเวลาเทรน" : "เริ่มเทรน"} <Rocket size={15} />
             </Button>
           )}
         </div>
@@ -361,18 +545,6 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
       {children}
       {hint && <p className="text-[11px] text-base-500 mt-1">{hint}</p>}
     </div>
-  );
-}
-
-function NumberInput({ value, onChange, step = 1 }: { value: number; onChange: (n: number) => void; step?: number }) {
-  return (
-    <input
-      type="number"
-      step={step}
-      value={value}
-      onChange={(e) => onChange(Number(e.target.value))}
-      className="w-full bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-500"
-    />
   );
 }
 

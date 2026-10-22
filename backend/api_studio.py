@@ -1,0 +1,893 @@
+"""endpoint ชุดใหม่ของ LLM Studio (แยกจาก main.py เพื่อไม่ให้ไฟล์เดียวยาวเกินอ่าน)
+
+กลุ่มที่มี: ตั้งค่า, ล็อกอิน, ฮาร์ดแวร์/Preflight, คิวงาน, คลังความรู้, Playground (สตรีม),
+ชุดข้อมูล (เวอร์ชัน/PII), ทะเบียนโมเดล, ชุดทดสอบเปรียบเทียบ, ระบบ (ดิสก์/สำรอง/audit)
+ทุกอย่างอยู่ใต้ /api และ main.py include router นี้เข้าไป
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import tempfile
+import time
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
+from pydantic import BaseModel
+
+import apikeys
+import auth
+import config
+import datasets_mgr
+import db
+import evalx
+import hardware
+import kb
+import kbtests
+import logs
+import ollama_client
+import preflight
+import registry
+import store
+import sysops
+from jobs import guess_params_b, manager
+
+router = APIRouter()
+
+MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+# ====================================================================== ตั้งค่า
+# คีย์ที่หน้าเว็บแก้ได้ (ไม่รวม auth/ธงภายใน) พร้อมชนิดข้อมูลที่ยอมรับ
+_EDITABLE: dict[str, type | tuple] = {
+    "ollama_url": str, "embed_model": str, "network_mode": str, "unload_before_train": bool,
+    "reload_after_train": bool, "keep_alive": str, "default_system_prompt": str,
+    "kb_chunk_size": int, "kb_chunk_overlap": int, "kb_top_k": int, "kb_min_score": (int, float),
+    "max_train_minutes": int, "cors_origins": list, "auto_backup": bool, "backup_keep": int, "kb_pii_block": bool,
+}
+
+
+@router.get("/settings")
+def get_settings():
+    return config.public_settings()
+
+
+@router.put("/settings")
+def put_settings(patch: dict[str, Any]):
+    clean: dict[str, Any] = {}
+    for k, v in patch.items():
+        if k not in _EDITABLE:
+            continue
+        want = _EDITABLE[k]
+        if isinstance(v, bool) and want is not bool and bool not in (want if isinstance(want, tuple) else (want,)):
+            raise HTTPException(400, f"ค่าของ {k} ไม่ถูกต้อง")
+        if not isinstance(v, want):  # type: ignore[arg-type]
+            raise HTTPException(400, f"ค่าของ {k} ไม่ถูกต้อง")
+        clean[k] = v
+    if clean.get("network_mode") not in (None, "safe", "fast"):
+        raise HTTPException(400, 'network_mode ต้องเป็น "safe" หรือ "fast"')
+    if "ollama_url" in clean:
+        clean["ollama_url"] = clean["ollama_url"].strip().rstrip("/")
+    config.save_settings(clean)
+    db.audit("settings.update", "", ",".join(clean.keys()))
+    return config.public_settings()
+
+
+# ====================================================================== ล็อกอิน
+class PasswordBody(BaseModel):
+    password: str
+
+
+@router.get("/auth/status")
+def auth_status():
+    return {"enabled": auth.is_enabled()}
+
+
+@router.post("/auth/login")
+def auth_login(body: PasswordBody):
+    if not auth.is_enabled():
+        return {"ok": True, "token": ""}
+    if not auth.verify_password(body.password):
+        db.audit("auth.fail", "", "รหัสผ่านไม่ถูกต้อง")
+        raise HTTPException(401, "รหัสผ่านไม่ถูกต้อง")
+    return {"ok": True, "token": auth.issue_token()}
+
+
+@router.post("/auth/set-password")
+def auth_set_password(body: PasswordBody):
+    """ตั้ง/เปลี่ยนรหัสผ่านและเปิดการล็อกอิน (ถ้าเปิดอยู่แล้ว middleware บังคับให้ล็อกอินก่อนถึงมาถึงตรงนี้)"""
+    try:
+        auth.set_password(body.password)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    db.audit("auth.set_password")
+    return {"ok": True, "token": auth.issue_token()}
+
+
+@router.post("/auth/disable")
+def auth_disable():
+    auth.disable()
+    db.audit("auth.disable")
+    return {"ok": True}
+
+
+# ====================================================================== ฮาร์ดแวร์ / Preflight
+def _params_from_catalog(base_model: str) -> float:
+    """ขนาดโมเดลจากแคตตาล็อก ('14B' → 14) ถ้าไม่มีให้เดาจากชื่อ"""
+    for m in store.list_models():
+        if m["id"] == base_model:
+            digits = "".join(c for c in str(m.get("params", "")) if c.isdigit() or c == ".")
+            try:
+                return float(digits)
+            except ValueError:
+                break
+    return guess_params_b(base_model)
+
+
+@router.get("/system/hardware")
+async def system_hardware():
+    hw = hardware.probe_all()
+    hw["ollama_up"] = await ollama_client.is_up()
+    hw["ollama_running"] = [
+        {"name": m.get("name"), "size_gb": round((m.get("size_vram") or m.get("size") or 0) / 1e9, 1)}
+        for m in await ollama_client.running_models()]
+    return hw
+
+
+class PreflightBody(BaseModel):
+    base_model: str
+    max_seq_length: int = 512
+    batch_size: int = 0
+    params_b: float = 0
+    export_after: bool = True
+
+
+def _preflight(body: PreflightBody) -> dict:
+    hw = hardware.probe_all()
+    params_b = body.params_b or _params_from_catalog(body.base_model)
+    gpu = hw.get("gpu")
+    rec = hardware.recommend_training(gpu["vram_total_gb"] if gpu else 0.0, params_b, body.max_seq_length,
+                                      is_linux=not config.IS_WINDOWS, cpu_threads=hw["cpu"]["threads"])
+    batch = body.batch_size or rec["batch_size"]
+    res = preflight.evaluate(params_b, batch, body.max_seq_length, hw, body.export_after)
+    res["recommended"] = rec
+    res["params_b"] = params_b
+    res["batch_used"] = batch
+    return res
+
+
+@router.post("/preflight")
+def run_preflight(body: PreflightBody):
+    return _preflight(body)
+
+
+# ====================================================================== คิวงาน
+@router.get("/queue")
+def get_queue():
+    return manager.queue_info()
+
+
+@router.post("/jobs/{job_id}/prioritize")
+def prioritize_job(job_id: str):
+    job = manager.get(job_id)
+    if not job or job.status not in ("queued", "scheduled"):
+        raise HTTPException(400, "ดันได้เฉพาะงานที่รออยู่ในคิว")
+    manager.prioritize(job)
+    return manager.queue_info()
+
+
+# ====================================================================== คลังความรู้
+class DocBody(BaseModel):
+    title: str
+    text: str
+    kind: str = "text"
+    category: str = ""
+    tags: list[str] = []
+    pii_ack: bool = False     # ยืนยันว่ารับทราบผลตรวจข้อมูลระบุตัวตนแล้ว
+
+
+class QABody(BaseModel):
+    question: str
+    answer: str
+    category: str = ""
+    tags: list[str] = []
+    pii_ack: bool = False
+
+
+class DocPatch(BaseModel):
+    title: str | None = None
+    text: str | None = None
+    category: str | None = None
+    tags: list[str] | None = None
+    enabled: bool | None = None
+    pii_ack: bool = False
+
+
+class ChunkPreviewBody(BaseModel):
+    text: str
+    size: int | None = None
+    overlap: int | None = None
+
+
+class SearchBody(BaseModel):
+    query: str
+    top_k: int | None = None
+    category: str = ""
+
+
+def _pii_findings(*texts: str | None) -> list[dict]:
+    """สแกนข้อความหาข้อมูลระบุตัวตน (คืนเฉพาะชนิดที่บล็อก: เลขบัตร/HN/เบอร์/อีเมล; sample ถูกปิดบังแล้ว)"""
+    out: list[dict] = []
+    for t in texts:
+        if t:
+            out += [f for f in datasets_mgr.scan_text(t) if f["type"] in datasets_mgr.BLOCKING_TYPES]
+    return out
+
+
+def _pii_gate(ack: bool, *texts: str | None) -> None:
+    """ถ้าเปิดบล็อกไว้และพบข้อมูลระบุตัวตนโดยผู้ใช้ยังไม่ยืนยัน ตอบ 409 พร้อมรายละเอียดให้หน้าเว็บถามยืนยัน"""
+    if ack or not config.get_settings().get("kb_pii_block", True):
+        return
+    found = _pii_findings(*texts)
+    if found:
+        by_type: dict[str, int] = {}
+        for f in found:
+            by_type[f["type"]] = by_type.get(f["type"], 0) + 1
+        raise HTTPException(409, {"code": "pii", "by_type": by_type, "samples": found[:5],
+                                  "message": "พบข้อมูลที่ระบุตัวตนได้ในเนื้อหา (เลขบัตร/HN/เบอร์โทร/อีเมล) "
+                                             "ข้อมูลในคลังความรู้ถูกส่งเข้า prompt ของโมเดล ตรวจและเอาออกก่อน หรือกดยืนยันถ้าเป็นข้อมูลสมมติ"})
+
+
+async def _embed_quietly() -> dict:
+    """สร้างเวกเตอร์หลังเพิ่ม/แก้ความรู้ ถ้า Ollama ไม่พร้อมก็ไม่ล้ม ส่งข้อความบอกสาเหตุกลับไปแทน"""
+    try:
+        return await kb.embed_pending()
+    except Exception as e:  # noqa: BLE001
+        return {"embedded_now": 0, "remaining": -1, "error": str(e)}
+
+
+async def _doc_and_embed(doc_id: str) -> dict:
+    """สร้างเวกเตอร์แล้วอ่านเอกสารใหม่ เพื่อให้ตัวเลข embedded ในคำตอบเป็นค่าหลังสร้างเสร็จ ไม่ใช่ก่อนสร้าง"""
+    embed = await _embed_quietly()
+    return {"doc": kb.get_doc(doc_id), "embed": embed}
+
+
+@router.get("/kb/stats")
+def kb_stats():
+    return kb.stats()
+
+
+@router.get("/kb/categories")
+def kb_categories():
+    return kb.categories()
+
+
+@router.get("/kb/docs")
+def kb_list(q: str = "", category: str = "", tag: str = "", kind: str = ""):
+    return kb.list_docs(q, category, tag, kind)
+
+
+@router.get("/kb/docs/{doc_id}")
+def kb_get(doc_id: str):
+    d = kb.get_doc(doc_id)
+    if not d:
+        raise HTTPException(404, "ไม่พบเอกสารนี้")
+    return d
+
+
+@router.post("/kb/docs")
+async def kb_add(body: DocBody):
+    _pii_gate(body.pii_ack, body.title, body.text)
+    try:
+        d = kb.add_doc(body.title, body.text, body.kind, body.category, body.tags)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return await _doc_and_embed(d["id"])
+
+
+@router.post("/kb/qa")
+async def kb_add_qa(body: QABody):
+    _pii_gate(body.pii_ack, body.question, body.answer)
+    if not body.question.strip() or not body.answer.strip():
+        raise HTTPException(400, "ต้องกรอกทั้งคำถามและคำตอบ")
+    d = kb.add_doc(body.question.strip()[:80], kb.qa_text(body.question, body.answer), "qa", body.category, body.tags)
+    return await _doc_and_embed(d["id"])
+
+
+@router.put("/kb/docs/{doc_id}")
+async def kb_update(doc_id: str, body: DocPatch):
+    _pii_gate(body.pii_ack, body.title, body.text)
+    try:
+        d = kb.update_doc(doc_id, body.title, body.text, body.category, body.tags, body.enabled)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not d:
+        raise HTTPException(404, "ไม่พบเอกสารนี้")
+    return await _doc_and_embed(doc_id)
+
+
+@router.delete("/kb/docs/{doc_id}")
+def kb_delete(doc_id: str):
+    if not kb.delete_doc(doc_id):
+        raise HTTPException(404, "ไม่พบเอกสารนี้")
+    return {"ok": True}
+
+
+@router.get("/kb/docs/{doc_id}/history")
+def kb_doc_history(doc_id: str):
+    return kb.history(doc_id)
+
+
+@router.post("/kb/docs/{doc_id}/restore/{history_id}")
+async def kb_restore(doc_id: str, history_id: int):
+    d = kb.restore_version(doc_id, history_id)
+    if not d:
+        raise HTTPException(400, "ย้อนกลับไปรายการนี้ไม่ได้")
+    return await _doc_and_embed(doc_id)
+
+
+@router.get("/kb/history")
+def kb_all_history(limit: int = 100):
+    return kb.history(None, limit)
+
+
+@router.post("/kb/preview-chunks")
+def kb_preview(body: ChunkPreviewBody):
+    chunks = kb.preview_chunks(body.text, body.size, body.overlap)
+    return {"count": len(chunks), "chunks": chunks[:50]}
+
+
+@router.post("/kb/upload")
+async def kb_upload(files: list[UploadFile] = File(...), category: str = Form(""), tags: str = Form(""), pii_ack: bool = Form(False)):
+    """อัปโหลดไฟล์ (txt, md, csv, pdf, docx) หลายไฟล์ในครั้งเดียว คืนผลรายไฟล์ ไฟล์ไหนอ่านไม่ได้ก็ไม่ทำให้ไฟล์อื่นล้ม"""
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+    results = []
+    added = 0
+    for f in files:
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            results.append({"file": f.filename, "ok": False, "error": "ไฟล์ใหญ่เกิน 25 MB"})
+            continue
+        try:
+            items = kb.extract_from_file(f.filename or "file.txt", data)
+            if not items:
+                results.append({"file": f.filename, "ok": False, "error": "ไม่พบเนื้อหาในไฟล์"})
+                continue
+            if not pii_ack and config.get_settings().get("kb_pii_block", True) and any(_pii_findings(it["title"], it["text"]) for it in items):
+                results.append({"file": f.filename, "ok": False, "pii": True,
+                                "error": "พบข้อมูลระบุตัวตน (เลขบัตร/HN/เบอร์/อีเมล) ไม่ได้เพิ่ม ตรวจไฟล์ หรือยืนยันเพื่อเพิ่มต่อ"})
+                continue
+            for it in items:
+                kb.add_doc(it["title"], it["text"], it["kind"], category, tag_list, f.filename or "")
+                added += 1
+            results.append({"file": f.filename, "ok": True, "docs": len(items)})
+        except ValueError as e:
+            results.append({"file": f.filename, "ok": False, "error": str(e)})
+    embed = await _embed_quietly() if added else {}
+    return {"added": added, "files": results, "embed": embed}
+
+
+@router.post("/kb/embed")
+async def kb_embed():
+    """สร้างเวกเตอร์ใหม่ให้ชิ้นที่ยังไม่มี (กดเองได้เมื่อเปลี่ยนโมเดลสร้างเวกเตอร์ในตั้งค่า)"""
+    return await kb.embed_pending()
+
+
+@router.post("/kb/search")
+async def kb_search(body: SearchBody):
+    return await kb.search(body.query, body.top_k, None, body.category)
+
+
+@router.get("/kb/export")
+def kb_export():
+    return PlainTextResponse(kb.export_jsonl(), media_type="application/x-ndjson",
+                             headers={"Content-Disposition": 'attachment; filename="knowledge-base.jsonl"'})
+
+
+class ImportBody(BaseModel):
+    text: str
+
+
+@router.post("/kb/import")
+async def kb_import(body: ImportBody):
+    res = kb.import_jsonl(body.text)
+    res["embed"] = await _embed_quietly()
+    return res
+
+
+# ====================================================================== Playground (สตรีม)
+class PlayBody(BaseModel):
+    model: str
+    message: str
+    history: list[dict] = []
+    use_kb: bool = True
+    top_k: int | None = None
+    system_prompt: str | None = None
+    temperature: float | None = None
+
+
+@router.post("/playground/chat")
+async def playground_chat(body: PlayBody):
+    """ถาม-ตอบกับโมเดลแบบสตรีม (NDJSON): บรรทัดแรกเป็นแหล่งความรู้ที่ดึงมา ตามด้วยข้อความทีละช่วง และสถิติตอนจบ
+    แยก 3 ชนิด: {"type":"sources"} / {"type":"delta"} / {"type":"done"|"error"}"""
+    s = config.get_settings()
+    system = body.system_prompt if body.system_prompt is not None else s["default_system_prompt"]
+    hits: list[dict] = []
+    search_info: dict = {}
+    if body.use_kb:
+        search_info = await kb.search(body.message, body.top_k)
+        hits = search_info.get("hits", [])
+        ctx = kb.build_context(hits)
+        if ctx:
+            system = f"{system}\n\n{ctx}".strip()
+    messages: list[dict] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages += [m for m in body.history if m.get("role") in ("user", "assistant") and m.get("content")]
+    messages.append({"role": "user", "content": body.message})
+    options = {"temperature": body.temperature} if body.temperature is not None else None
+
+    async def gen():
+        yield json.dumps({"type": "sources", "hits": hits, "mode": search_info.get("mode", "off"),
+                          "note": search_info.get("note", "")}, ensure_ascii=False) + "\n"
+        async for ev in ollama_client.chat_stream(body.model, messages, options):
+            if "delta" in ev:
+                yield json.dumps({"type": "delta", "text": ev["delta"]}, ensure_ascii=False) + "\n"
+            elif "error" in ev:
+                yield json.dumps({"type": "error", "error": ev["error"]}, ensure_ascii=False) + "\n"
+            elif ev.get("done"):
+                yield json.dumps({"type": "done", **{k: v for k, v in ev.items() if k != "done"}}, ensure_ascii=False) + "\n"
+
+    return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+# ====================================================================== ชุดข้อมูล
+class ExamplesBody(BaseModel):
+    examples: list[dict]
+    note: str = ""
+
+
+class FromKBBody(BaseModel):
+    label: str
+    notes: str = ""
+
+
+class RestoreVersionBody(BaseModel):
+    version: int
+
+
+@router.post("/datasets/scan")
+def datasets_scan(body: ExamplesBody):
+    """ตรวจข้อมูลระบุตัวตนในตัวอย่างที่ส่งมา (ยังไม่บันทึกอะไร) ใช้ก่อนกดสร้าง/นำเข้า"""
+    return datasets_mgr.scan_examples(body.examples)
+
+
+@router.get("/datasets/{dataset_id}/versions")
+def datasets_versions(dataset_id: str):
+    return datasets_mgr.list_versions(dataset_id)
+
+
+@router.get("/datasets/{dataset_id}/preview")
+def datasets_preview(dataset_id: str, version: int = 0, limit: int = 20):
+    return datasets_mgr.preview(dataset_id, version or None, limit)
+
+
+@router.get("/datasets/{dataset_id}/scan")
+def datasets_scan_one(dataset_id: str):
+    return datasets_mgr.scan_dataset(dataset_id)
+
+
+@router.post("/datasets/{dataset_id}/append")
+def datasets_append(dataset_id: str, body: ExamplesBody):
+    if not store.get_dataset(dataset_id) or not dataset_id.startswith("custom-"):
+        raise HTTPException(404, "ไม่พบชุดข้อมูลนี้ (เพิ่มตัวอย่างได้เฉพาะชุดข้อมูลที่สร้างเอง)")
+    try:
+        return datasets_mgr.append_examples(dataset_id, body.examples, body.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/datasets/{dataset_id}/restore")
+def datasets_restore(dataset_id: str, body: RestoreVersionBody):
+    try:
+        return datasets_mgr.restore_version(dataset_id, body.version)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/datasets/from-kb")
+def datasets_from_kb(body: FromKBBody):
+    try:
+        return datasets_mgr.from_kb(body.label, body.notes)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+# ====================================================================== ทะเบียนโมเดล
+class RegisterBody(BaseModel):
+    name: str
+    base_model: str = ""
+    notes: str = ""
+
+
+class NotesBody(BaseModel):
+    notes: str
+
+
+@router.get("/registry")
+def registry_list():
+    return registry.list_all()
+
+
+@router.get("/registry/active")
+def registry_active():
+    """โมเดลที่ใช้งานจริงตอนนี้ — เว็บระบบติดตามเรียกอันนี้เพื่อรู้ว่าควรถามโมเดลชื่ออะไร"""
+    a = registry.active()
+    if not a:
+        raise HTTPException(404, "ยังไม่มีโมเดลที่ตั้งเป็นใช้งานจริง")
+    return a
+
+
+@router.get("/registry/events")
+def registry_events(version_id: str = "", limit: int = 100):
+    return registry.events(version_id or None, limit)
+
+
+@router.post("/registry")
+def registry_add(body: RegisterBody):
+    if not body.name.strip():
+        raise HTTPException(400, "ต้องระบุชื่อโมเดลใน Ollama")
+    return registry.register(body.name.strip(), body.base_model, notes=body.notes)
+
+
+def _reg_call(fn, *args):
+    try:
+        return fn(*args)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/registry/{vid}/approve")
+def registry_approve(vid: str):
+    return _reg_call(registry.approve, vid)
+
+
+@router.post("/registry/{vid}/activate")
+async def registry_activate(vid: str):
+    v = _reg_call(registry.activate, vid)
+    asyncio.get_running_loop().create_task(ollama_client.warm(v["name"]))  # อุ่นโมเดลไว้ล่วงหน้า ไม่ให้คำถามแรกช้า
+    return v
+
+
+@router.post("/registry/{vid}/archive")
+def registry_archive(vid: str):
+    return _reg_call(registry.archive, vid)
+
+
+@router.post("/registry/rollback")
+async def registry_rollback():
+    v = _reg_call(registry.rollback)
+    asyncio.get_running_loop().create_task(ollama_client.warm(v["name"]))
+    return v
+
+
+@router.put("/registry/{vid}/notes")
+def registry_notes(vid: str, body: NotesBody):
+    v = registry.set_notes(vid, body.notes)
+    if not v:
+        raise HTTPException(404, "ไม่พบเวอร์ชันนี้")
+    return v
+
+
+@router.delete("/registry/{vid}")
+def registry_delete(vid: str):
+    if not registry.delete(vid):
+        raise HTTPException(400, "ลบไม่ได้ (ไม่พบ หรือเป็นโมเดลที่ใช้งานอยู่)")
+    return {"ok": True}
+
+
+# ====================================================================== ชุดทดสอบ: รัน/เปรียบเทียบ
+class PromptPatch(BaseModel):
+    text: str | None = None
+    category: str | None = None
+    expect: list[str] | None = None
+    must_not: list[str] | None = None
+    red_flag: bool | None = None
+    pinned: bool | None = None
+
+
+@router.put("/eval/prompts/{prompt_id}")
+def eval_update_prompt(prompt_id: str, body: PromptPatch):
+    return store.update_prompt(prompt_id, body.model_dump())
+
+
+async def run_eval(model: str, prompt_ids: list[str]) -> dict:
+    """รันโจทย์ชุดหนึ่งกับโมเดลหนึ่ง พร้อมตรวจเงื่อนไขอัตโนมัติและวัดเวลา/ความเร็ว แล้วบันทึกเป็นรอบทดสอบ"""
+    all_prompts = {p["id"]: p for p in store.list_prompts()}
+    run_id = store.new_run_id()
+    results = []
+    for pid in prompt_ids:
+        prompt = all_prompts.get(pid)
+        if not prompt:
+            continue
+        r = await ollama_client.chat(model, [{"role": "user", "content": prompt["text"]}])
+        err = "error" in r
+        reply = f"(error: {r['error']})" if err else r["reply"]
+        chk = {"passed": None, "missing": [], "violated": []} if err else evalx.check_reply(prompt, reply)
+        results.append({
+            "id": f"{pid}-{run_id}", "prompt_id": pid, "prompt_text": prompt["text"], "response": reply,
+            "rating": None, "red_flag": bool(prompt.get("red_flag")), "error": err,
+            "passed": chk["passed"], "missing": chk["missing"], "violated": chk["violated"],
+            "total_s": r.get("total_s"), "tokens_per_s": r.get("tokens_per_s"),
+        })
+    run = {"id": run_id, "model": model, "created_at": time.time(), "results": results,
+           "summary": evalx.summarize(results)}
+    store.save_run(run)
+    return run
+
+
+class CompareBody(BaseModel):
+    models: list[str]
+    prompt_ids: list[str] = []
+    pinned_only: bool = False
+
+
+def _select_prompts(prompt_ids: list[str], pinned_only: bool) -> list[str]:
+    if prompt_ids:
+        return prompt_ids
+    prompts = store.list_prompts()
+    if pinned_only:
+        prompts = [p for p in prompts if p.get("pinned") or p.get("red_flag")]
+    return [p["id"] for p in prompts]
+
+
+@router.post("/eval/compare")
+async def eval_compare(body: CompareBody):
+    """รันชุดโจทย์เดียวกันกับหลายโมเดล (ทีละโมเดล กัน VRAM ไม่พอ) แล้วจัดเป็นตารางเทียบเคียงข้างกัน"""
+    if len(body.models) < 2:
+        raise HTTPException(400, "เลือกอย่างน้อย 2 โมเดลเพื่อเปรียบเทียบ")
+    ids = _select_prompts(body.prompt_ids, body.pinned_only)
+    if not ids:
+        raise HTTPException(400, "ยังไม่มีโจทย์ให้ทดสอบ")
+    runs = {}
+    for m in body.models:
+        runs[m] = await run_eval(m, ids)
+    rows = []
+    for pid in ids:
+        row: dict = {"prompt_id": pid, "answers": {}}
+        for m, run in runs.items():
+            res = next((r for r in run["results"] if r["prompt_id"] == pid), None)
+            if res:
+                row["prompt_text"] = res["prompt_text"]
+                row["red_flag"] = res["red_flag"]
+                row["answers"][m] = {k: res[k] for k in ("response", "passed", "missing", "violated", "total_s", "tokens_per_s")}
+        rows.append(row)
+    return {"models": body.models, "rows": rows,
+            "summaries": {m: r["summary"] for m, r in runs.items()},
+            "run_ids": {m: r["id"] for m, r in runs.items()}}
+
+
+@router.post("/registry/{vid}/eval")
+async def registry_eval(vid: str, prompt_ids: list[str] | None = None):
+    """ทดสอบเวอร์ชันนี้ด้วยโจทย์ที่ตรึงไว้ (และเคส red flag) แล้วแนบผลสรุปเข้าทะเบียน"""
+    v = registry.get(vid)
+    if not v:
+        raise HTTPException(404, "ไม่พบเวอร์ชันนี้")
+    ids = _select_prompts(prompt_ids or [], True)
+    if not ids:
+        raise HTTPException(400, "ยังไม่มีโจทย์ที่ตรึงไว้ ไปตรึงโจทย์ในหน้าทดสอบก่อน")
+    run = await run_eval(v["name"], ids)
+    summary = {**run["summary"], "run_id": run["id"], "at": run["created_at"]}
+    return registry.attach_eval(vid, summary)
+
+
+# ====================================================================== ระบบ: ดิสก์ / สำรอง / audit / Ollama
+def _busy_job_ids() -> set[str]:
+    return {j.id for j in manager.jobs.values() if j.status in ("training", "exporting", "creating_ollama", "queued", "scheduled")}
+
+
+@router.get("/system/disk")
+def system_disk():
+    return {"disk": hardware.probe_disk(), "breakdown": sysops.disk_breakdown(_busy_job_ids())}
+
+
+@router.delete("/system/disk/{name}")
+def system_disk_delete(name: str):
+    try:
+        return sysops.delete_item(name, _busy_job_ids())
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/system/cleanup-scripts")
+def system_cleanup_scripts():
+    return {"removed": sysops.cleanup_scripts()}
+
+
+@router.get("/system/backups")
+def system_backups():
+    return sysops.list_backups()
+
+
+@router.post("/system/backups")
+def system_backup_create():
+    return sysops.create_backup()
+
+
+@router.get("/system/backups/{name}")
+def system_backup_download(name: str):
+    try:
+        p = sysops.backup_path(name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return FileResponse(p, filename=name, media_type="application/zip")
+
+
+@router.post("/system/backups/{name}/restore")
+def system_backup_restore(name: str):
+    try:
+        return sysops.restore_backup(sysops.backup_path(name))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/system/restore-upload")
+async def system_restore_upload(file: UploadFile = File(...)):
+    data = await file.read()
+    if len(data) > 500 * 1024 * 1024:
+        raise HTTPException(400, "ไฟล์ใหญ่เกินไป")
+    with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+        tmp.write(data)
+        path = Path(tmp.name)
+    try:
+        return sysops.restore_backup(path)
+    except Exception as e:  # noqa: BLE001 — zip เสีย/ไม่ใช่ไฟล์สำรองของระบบ แจ้งเป็นข้อความอ่านได้
+        raise HTTPException(400, str(e) if isinstance(e, ValueError) else "ไฟล์นี้ไม่ใช่ไฟล์สำรองที่ถูกต้อง")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@router.get("/system/audit")
+def system_audit(limit: int = 200, action: str = ""):
+    if action:
+        return db.query("SELECT * FROM audit_log WHERE action LIKE ? ORDER BY id DESC LIMIT ?", (action + "%", limit))
+    return db.query("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (limit,))
+
+
+@router.get("/system/ollama-tuning")
+def system_ollama_tuning():
+    gpu = hardware.probe_all().get("gpu")
+    return sysops.ollama_tuning(gpu["vram_total_gb"] if gpu else 0.0, config.IS_WINDOWS)
+
+
+# ---- สแกนข้อมูลระบุตัวตนทั้งคลัง + ชุดทดสอบการค้น
+@router.get("/kb/pii-scan")
+def kb_pii_scan():
+    """สแกนเอกสารทุกชิ้นในคลัง คืนรายการที่พบข้อมูลระบุตัวตน (ไม่คืนค่าจริงเต็ม ๆ)"""
+    flagged = []
+    for d in kb.list_docs(include_text=True):
+        found = _pii_findings(d["title"], d["raw_text"])
+        if found:
+            by_type: dict[str, int] = {}
+            for f in found:
+                by_type[f["type"]] = by_type.get(f["type"], 0) + 1
+            flagged.append({"doc_id": d["id"], "title": d["title"], "by_type": by_type})
+    return {"scanned": len(kb.list_docs()), "flagged": flagged}
+
+
+class KbTestBody(BaseModel):
+    question: str
+    expect_doc_ids: list[str]
+    note: str = ""
+
+
+@router.get("/kb/tests")
+def kb_tests_list():
+    return kbtests.list_tests()
+
+
+@router.post("/kb/tests")
+def kb_tests_add(body: KbTestBody):
+    try:
+        return kbtests.add_test(body.question, body.expect_doc_ids, body.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.delete("/kb/tests/{tid}")
+def kb_tests_delete(tid: str):
+    if not kbtests.delete_test(tid):
+        raise HTTPException(404, "ไม่พบข้อสอบนี้")
+    return {"ok": True}
+
+
+@router.post("/kb/tests/run")
+async def kb_tests_run():
+    return await kbtests.run_all()
+
+
+# ====================================================================== คีย์ API (ให้ระบบอื่นเรียก /api/v1/*)
+class KeyBody(BaseModel):
+    name: str
+
+
+@router.get("/apikeys")
+def apikeys_list():
+    return apikeys.list_all()
+
+
+@router.post("/apikeys")
+def apikeys_create(body: KeyBody):
+    try:
+        return apikeys.create(body.name)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/apikeys/{kid}/enabled")
+def apikeys_enable(kid: str, body: dict[str, Any]):
+    if not apikeys.set_enabled(kid, bool(body.get("enabled"))):
+        raise HTTPException(404, "ไม่พบคีย์นี้")
+    return apikeys.list_all()
+
+
+@router.delete("/apikeys/{kid}")
+def apikeys_delete(kid: str):
+    if not apikeys.delete(kid):
+        raise HTTPException(404, "ไม่พบคีย์นี้")
+    return {"ok": True}
+
+
+# ====================================================================== log และข้อมูลวินิจฉัย
+@router.get("/system/logs/{name}")
+def system_logs(name: str, lines: int = 300):
+    try:
+        return {"name": name, "lines": logs.tail(name, lines)}
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+
+
+@router.get("/system/logs/{name}/download")
+def system_logs_download(name: str):
+    try:
+        p = logs.path_of(name)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    if not p.exists():
+        raise HTTPException(404, "ยังไม่มี log นี้")
+    return FileResponse(p, filename=p.name, media_type="text/plain")
+
+
+@router.get("/system/diagnostics")
+async def system_diagnostics():
+    """รวมข้อมูลที่ต้องใช้ตอนแจ้งปัญหา: เวอร์ชัน เครื่อง การตั้งค่า (ไม่มีรหัส/คีย์) Ollama และ log ท้ายๆ"""
+    import platform
+    import sys
+    hw = hardware.probe_all()
+    tags = await ollama_client.list_models() if hasattr(ollama_client, "list_models") else None
+    return {
+        "python": sys.version.split()[0], "platform": platform.platform(), "root": str(config.PROJECT_ROOT),
+        "hardware": hw, "ollama_up": await ollama_client.is_up(),
+        "ollama_models": [m.get("name") for m in (tags or [])] if isinstance(tags, list) else None,
+        "settings": config.public_settings(), "kb": kb.stats(),
+        "active_model": (registry.active() or {}).get("name"),
+        "backend_log_tail": logs.tail("backend", 40), "client_log_tail": logs.tail("client", 40),
+    }
+
+
+@router.get("/dashboard")
+async def dashboard():
+    """ข้อมูลรวมสำหรับหน้าแรก: โมเดลที่ใช้งาน คลังความรู้ งาน ดิสก์ GPU"""
+    hw = hardware.probe_all()
+    jobs_pub = manager.list()
+    return {
+        "active_model": registry.active(),
+        "kb": kb.stats(),
+        "queue": manager.queue_info(),
+        "recent_jobs": jobs_pub[:5],
+        "hardware": hw,
+        "ollama_up": await ollama_client.is_up(),
+        "registry_counts": {s: sum(1 for v in registry.list_all() if v["status"] == s) for s in registry.STATUSES},
+    }

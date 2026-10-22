@@ -4,7 +4,11 @@ import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
 import { api } from "../api/client";
 import type { EvalPrompt, EvalRun, LeaderboardRow, OllamaModel } from "../types";
-import { Star, Trash2, Plus, Play, Trophy } from "lucide-react";
+import { Star, Trash2, Plus, Play, Trophy, Pencil, Pin, Siren, CheckCircle2, XCircle } from "lucide-react";
+import EvalCompare from "../components/EvalCompare";
+import PromptEditor from "../components/PromptEditor";
+import { Pill } from "../components/ui";
+import { toast, errText } from "../components/toast";
 
 export default function Eval() {
   const [prompts, setPrompts] = useState<EvalPrompt[]>([]);
@@ -17,17 +21,18 @@ export default function Eval() {
   const [running, setRunning] = useState(false);
   const [newPromptText, setNewPromptText] = useState("");
   const [newPromptCat, setNewPromptCat] = useState("ทั่วไป");
+  const [editing, setEditing] = useState<EvalPrompt | null>(null);
 
   function loadPrompts() {
     api.evalPrompts().then((p) => {
       setPrompts(p);
       setSelectedPromptIds(new Set(p.map((x) => x.id)));
-    });
+    }).catch(() => {});
   }
 
   function loadRuns() {
-    api.evalRuns().then(setRuns);
-    api.leaderboard().then(setLeaderboard);
+    api.evalRuns().then(setRuns).catch(() => {});
+    api.leaderboard().then(setLeaderboard).catch(() => {});
   }
 
   useEffect(() => {
@@ -36,7 +41,7 @@ export default function Eval() {
     api.ollamaModels().then((m) => {
       setModels(m.models ?? []);
       setSelectedModel((prev) => prev || m.models?.[0]?.name || "");
-    });
+    }).catch(() => {});
   }, []);
 
   function togglePrompt(id: string) {
@@ -67,6 +72,8 @@ export default function Eval() {
       const run = await api.runEval(selectedModel, Array.from(selectedPromptIds));
       setActiveRun(run);
       loadRuns();
+    } catch (e) {
+      toast(errText(e), "bad");
     } finally {
       setRunning(false);
     }
@@ -81,9 +88,9 @@ export default function Eval() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <Topbar title="ทดสอบโมเดล" subtitle="รันชุดคำถามทดสอบกับโมเดล แล้วให้คะแนนเทียบกันได้" />
+      <Topbar title="ทดสอบและเปรียบเทียบ" subtitle="รันชุดคำถามกับโมเดล ตรวจเงื่อนไขอัตโนมัติ ให้คะแนน และเทียบหลายโมเดล" />
 
-      <div className="p-4 md:p-8 max-w-4xl space-y-6">
+      <div className="p-4 md:p-8 max-w-5xl space-y-6">
         <Card>
           <CardHeader title="ตั้งค่าการทดสอบ" />
           <div className="px-5 pb-5 space-y-4">
@@ -121,8 +128,16 @@ export default function Eval() {
                     />
                     <div className="flex-1 min-w-0">
                       <div className="text-sm">{p.text}</div>
-                      <span className="text-[11px] text-base-500">{p.category}</span>
+                      <div className="flex flex-wrap items-center gap-1.5 mt-0.5">
+                        <span className="text-[11px] text-base-500">{p.category}</span>
+                        {p.red_flag && <Pill tone="bad"><Siren size={10} className="mr-1" />red flag</Pill>}
+                        {p.pinned && <Pill tone="info"><Pin size={10} className="mr-1" />ตรึง</Pill>}
+                        {((p.expect?.length ?? 0) + (p.must_not?.length ?? 0)) > 0 && <Pill>มีเกณฑ์ตรวจ</Pill>}
+                      </div>
                     </div>
+                    <button onClick={(e) => { e.preventDefault(); setEditing(p); }} className="text-base-500 hover:text-base-100 shrink-0" title="แก้โจทย์/เกณฑ์ตรวจ">
+                      <Pencil size={13} />
+                    </button>
                     <button
                       onClick={(e) => {
                         e.preventDefault();
@@ -169,8 +184,17 @@ export default function Eval() {
             <div className="px-5 pb-5 space-y-3">
               {activeRun.results.map((r) => (
                 <div key={r.id} className="border border-base-800 rounded-lg p-3.5">
-                  <div className="text-xs text-base-500 mb-1.5">คำถาม: {r.prompt_text}</div>
+                  <div className="flex items-start justify-between gap-2 mb-1.5">
+                    <div className="text-xs text-base-500">คำถาม: {r.prompt_text}</div>
+                    {r.passed === true && <Pill tone="good"><CheckCircle2 size={11} className="mr-1" />ผ่าน</Pill>}
+                    {r.passed === false && <Pill tone="bad"><XCircle size={11} className="mr-1" />ไม่ผ่าน</Pill>}
+                  </div>
                   <div className="text-sm whitespace-pre-wrap mb-2.5">{r.response}</div>
+                  {(r.missing?.length ?? 0) > 0 && <div className="text-[11px] text-bad mb-1">ขาด: {r.missing!.join(", ")}</div>}
+                  {(r.violated?.length ?? 0) > 0 && <div className="text-[11px] text-bad mb-1">มีสิ่งที่ห้ามมี: {r.violated!.join(", ")}</div>}
+                  {(r.total_s || r.tokens_per_s) && (
+                    <div className="text-[11px] text-base-500 mb-1.5">{r.total_s ? `${r.total_s} วินาที` : ""} {r.tokens_per_s ? `· ${r.tokens_per_s} token/วินาที` : ""}</div>
+                  )}
                   <div className="flex items-center gap-1">
                     {[1, 2, 3, 4, 5].map((n) => (
                       <button key={n} onClick={() => rate(r.id, n)}>
@@ -188,6 +212,8 @@ export default function Eval() {
             </div>
           </Card>
         )}
+
+        <EvalCompare models={models.map((m) => m.name)} selectedPromptIds={selectedPromptIds} />
 
         <Card>
           <CardHeader
@@ -241,6 +267,7 @@ export default function Eval() {
           </Card>
         )}
       </div>
+      {editing && <PromptEditor prompt={editing} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); loadPrompts(); }} />}
     </div>
   );
 }

@@ -8,14 +8,18 @@ import StatusBadge from "../components/StatusBadge";
 import LogViewer from "../components/LogViewer";
 import { api } from "../api/client";
 import type { Job } from "../types";
-import { ChevronLeft, Download, Package, Trash2, MessageSquare, PlayCircle } from "lucide-react";
+import { ChevronLeft, Download, Package, Trash2, MessageSquare, PlayCircle, ArrowUpToLine } from "lucide-react";
+import { Notice, Pill, fmtDate } from "../components/ui";
+import { toast, errText } from "../components/toast";
+import type { QueueInfo } from "../types";
 
 export default function JobDetail() {
   const { id } = useParams<{ id: string }>();
   const [job, setJob] = useState<Job | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
-  const [lossPoints, setLossPoints] = useState<{ step: number; loss: number }[]>([]);
+  const [lossPoints, setLossPoints] = useState<{ step: number; loss: number; val_loss?: number }[]>([]);
+  const [queue, setQueue] = useState<QueueInfo | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
   const [ggufFile, setGgufFile] = useState<string | null>(null);
@@ -33,16 +37,25 @@ export default function JobDetail() {
       })
       .catch(() => setNotFound(true));
 
+    const loadQueue = () => api.queue().then(setQueue).catch(() => {});
+    loadQueue();
+    const qt = setInterval(loadQueue, 5000);
+
     const ws = api.jobSocket(id);
     wsRef.current = ws;
     ws.onmessage = (ev) => {
       const payload = JSON.parse(ev.data);
       if (payload.type === "log") setLogLines((prev) => [...prev.slice(-1999), payload.line]);
-      if (payload.type === "loss") setLossPoints((prev) => [...prev, payload.point]);
+      if (payload.type === "loss")
+        // จุดที่ step เดิมให้แทนที่ (เติม validation loss เข้าจุดเดิม) ไม่ต่อท้ายซ้ำ
+        setLossPoints((prev) => (prev.length && prev[prev.length - 1].step === payload.point.step ? [...prev.slice(0, -1), payload.point] : [...prev, payload.point]));
       if (payload.type === "status")
         setJob((prev) => (prev ? { ...prev, status: payload.status, error: payload.error ?? prev.error } : prev));
     };
-    return () => ws.close();
+    return () => {
+      ws.close();
+      clearInterval(qt);
+    };
   }, [id]);
 
   if (notFound) {
@@ -72,7 +85,9 @@ export default function JobDetail() {
   }
 
   const isDone = job.status === "done";
-  const isRunning = ["training", "exporting", "creating_ollama", "queued"].includes(job.status);
+  const isRunning = ["training", "exporting", "creating_ollama", "queued", "scheduled"].includes(job.status);
+  const waitPos = queue?.waiting.find((w) => w.id === job.id)?.position;
+  const hasVal = lossPoints.some((p) => p.val_loss !== undefined);
 
   async function doExport() {
     if (!id) return;
@@ -116,10 +131,11 @@ export default function JobDetail() {
       const r = await api.createOllamaModel({
         model_name: job.output_name,
         gguf_path: `./${dir}/${file}`,
+        job_id: job.id,
       });
       setActionMsg(
         r.ok
-          ? `สร้างโมเดล "${job.output_name}" เข้า Ollama แล้ว — ไปทดสอบแชทได้ที่หน้าโมเดล`
+          ? `สร้างโมเดล "${job.output_name}" เข้า Ollama แล้ว และลงทะเบียนเป็น "รอตรวจ" ในทะเบียนโมเดล — ไปทดสอบที่ Playground หรือหน้าทดสอบได้เลย`
           : `สร้างไม่สำเร็จ: ${r.stderr || "ดู log"}`
       );
     } finally {
@@ -167,7 +183,7 @@ export default function JobDetail() {
           <StatusBadge status={job.status} />
           <div className="flex gap-2">
             {isRunning && id && (
-              <Button variant="danger" className="text-xs py-1.5" onClick={() => api.stopJob(id)}>
+              <Button variant="danger" className="text-xs py-1.5" onClick={() => api.stopJob(id).catch((e) => toast(errText(e), "bad"))}>
                 หยุดงาน
               </Button>
             )}
@@ -190,12 +206,44 @@ export default function JobDetail() {
           </p>
         )}
 
+        {(job.status === "queued" || job.status === "scheduled") && (
+          <Notice tone="info">
+            <div>
+              {job.status === "scheduled" && job.start_at
+                ? `ตั้งเวลาเริ่ม ${fmtDate(job.start_at)}`
+                : `รอคิว${waitPos ? ` ลำดับที่ ${waitPos}` : ""} การ์ดจอทำทีละงาน งานนี้จะเริ่มเองเมื่อถึงคิว`}
+            </div>
+            {waitPos && waitPos > 1 && (
+              <Button variant="secondary" className="text-xs py-1 mt-1"
+                onClick={() => api.prioritize(job.id).then((q) => { setQueue(q); toast("ดันขึ้นหน้าคิวแล้ว"); }).catch((e) => toast(errText(e), "bad"))}>
+                <ArrowUpToLine size={13} /> ดันขึ้นเป็นคิวแรก
+              </Button>
+            )}
+          </Notice>
+        )}
+
+        {job.timed_out && <Notice tone="warn">งานนี้ถูกหยุดเพราะเกินเวลาสูงสุดที่ตั้งไว้ (ตั้งค่าที่หน้า "ตั้งค่า") กด "กลับมารันต่อ" เพื่อทำต่อจาก checkpoint</Notice>}
+
+        <Card className="p-4">
+          <div className="flex flex-wrap gap-x-5 gap-y-2 text-xs text-base-400">
+            {job.preset && <span>แบบ: <b className="text-base-200">{job.preset}</b></span>}
+            <span>batch <b className="text-base-200">{job.batch_size || "อัตโนมัติ"}</b> × accum <b className="text-base-200">{job.grad_accum || "อัตโนมัติ"}</b></span>
+            <span>learning rate <b className="text-base-200">{job.learning_rate ?? "-"}</b></span>
+            <span>epochs <b className="text-base-200">{job.num_train_epochs}</b></span>
+            {job.dataset_version ? <span>ข้อมูลเวอร์ชัน <b className="text-base-200">{job.dataset_version}</b></span> : null}
+            {job.template_mode === "legacy" && <Pill tone="warn">รูปแบบ prompt เดิม</Pill>}
+            {job.packing && <Pill tone="info">packing</Pill>}
+            {job.started_at && <span>เริ่ม {fmtDate(job.started_at)}</span>}
+            {job.finished_at && <span>จบ {fmtDate(job.finished_at)}</span>}
+          </div>
+        </Card>
+
         {job.error && (
           <div className="text-sm text-bad bg-bad/10 border border-bad/20 rounded-lg px-4 py-3">{job.error}</div>
         )}
 
         <Card>
-          <CardHeader title="Loss ระหว่างเทรน" subtitle={`${lossPoints.length} จุดข้อมูล`} />
+          <CardHeader title="Loss ระหว่างเทรน" subtitle={`${lossPoints.length} จุดข้อมูล${hasVal ? " · เส้นส้ม = loss ของชุดตรวจสอบ (ถ้าเริ่มสูงขึ้นขณะเส้นฟ้าลง แปลว่าโมเดลเริ่มท่องจำ)" : ""}`} />
           <div className="px-5 pb-5 h-56">
             {lossPoints.length > 0 ? (
               <ResponsiveContainer width="100%" height="100%">
@@ -206,7 +254,8 @@ export default function JobDetail() {
                   <Tooltip
                     contentStyle={{ background: "#131a24", border: "1px solid #232d3d", borderRadius: 8, fontSize: 12 }}
                   />
-                  <Line type="monotone" dataKey="loss" stroke="#4f8cff" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="loss" name="train" stroke="#4f8cff" strokeWidth={2} dot={false} />
+                  {hasVal && <Line type="monotone" dataKey="val_loss" name="validation" stroke="#fbbf24" strokeWidth={2} dot connectNulls />}
                 </LineChart>
               </ResponsiveContainer>
             ) : (
@@ -239,7 +288,7 @@ export default function JobDetail() {
               <Button variant="secondary" disabled={!isDone || busy !== null} onClick={doCreateOllama}>
                 <Download size={15} /> {busy === "ollama" ? "กำลังสร้าง..." : "สร้างเข้า Ollama"}
               </Button>
-              <Link to="/models">
+              <Link to="/playground">
                 <Button variant="secondary">
                   <MessageSquare size={15} /> ไปทดสอบแชท
                 </Button>

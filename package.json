@@ -1,0 +1,11 @@
+{
+  "name": "llm-studio-root",
+  "private": true,
+  "version": "0.6.8",
+  "description": "สคริปต์ลัดระดับโปรเจกต์ เพื่อให้สั่ง npm test ที่โฟลเดอร์นอกสุดแล้วรันเทสต์ได้ทั้งหน้าเว็บและ backend",
+  "scripts": {
+    "test": "npm run test:web && npm run test:api",
+    "test:web": "npm --prefix frontend test",
+    "test:api": "cd backend && python -m pytest tests -q"
+  }
+}

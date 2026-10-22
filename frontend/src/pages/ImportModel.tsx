@@ -3,7 +3,8 @@ import Topbar from "../components/Topbar";
 import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
 import { api } from "../api/client";
-import { Cloud, FolderInput, CheckCircle2, ExternalLink } from "lucide-react";
+import { NumberInput } from "../components/ui";
+import { Cloud, FolderInput, CheckCircle2, ExternalLink, type LucideIcon } from "lucide-react";
 
 export default function ImportModel() {
   const [name, setName] = useState("");
@@ -96,21 +97,10 @@ export default function ImportModel() {
                 />
               </Field>
               <Field label="num_ctx">
-                <input
-                  type="number"
-                  value={numCtx}
-                  onChange={(e) => setNumCtx(Number(e.target.value))}
-                  className="w-full bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-500"
-                />
+                <NumberInput value={numCtx} onChange={setNumCtx} min={256} />
               </Field>
               <Field label="temperature">
-                <input
-                  type="number"
-                  step={0.1}
-                  value={temperature}
-                  onChange={(e) => setTemperature(Number(e.target.value))}
-                  className="w-full bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-accent-500"
-                />
+                <NumberInput value={temperature} onChange={setTemperature} step={0.1} min={0} max={2} />
               </Field>
             </div>
 
@@ -154,7 +144,7 @@ function Step({
   children,
 }: {
   n: number;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  icon: LucideIcon;
   title: string;
   children: React.ReactNode;
 }) {
