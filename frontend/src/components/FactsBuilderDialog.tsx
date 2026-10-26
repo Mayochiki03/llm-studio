@@ -1,0 +1,125 @@
+// สร้างชุดข้อมูลเทรนจาก "ตารางข้อเท็จจริง" (ไม่ต้องใช้ AI): กรอกเรื่องละแถว ระบบขยายสำนวน กันข้อสอบ และสร้างโจทย์ทดสอบให้เอง
+import { useState } from "react";
+import { Plus, Trash2, Wand2, FileText, Eye } from "lucide-react";
+import Button from "./Button";
+import { Field, Modal, Notice, TextArea, TextInput, Toggle } from "./ui";
+import { toast, errText } from "./toast";
+import { api } from "../api/client";
+
+export interface FactRow {
+  topic: string;
+  answer: string;
+  questions: string; // คำถามแบบละบรรทัด
+  keywords: string; // คั่นด้วย comma
+  red_flag: boolean;
+}
+
+export const emptyRow = (): FactRow => ({ topic: "", answer: "", questions: "", keywords: "", red_flag: false });
+
+/** แปลงแถวในฟอร์มเป็นรูปที่ backend ต้องการ: คำถามแยกบรรทัด, คำสำคัญแยกด้วย comma (รองรับ comma ไทย/อังกฤษ) */
+export function rowsToFacts(rows: FactRow[]) {
+  return rows
+    .map((r) => ({
+      topic: r.topic.trim(),
+      answer: r.answer.trim(),
+      questions: r.questions.split("\n").map((x) => x.trim()).filter(Boolean),
+      keywords: r.keywords.split(/[,，]/).map((x) => x.trim()).filter(Boolean),
+      red_flag: r.red_flag,
+    }))
+    .filter((f) => f.answer && f.questions.length > 0);
+}
+
+export function factsToRows(facts: { topic?: string; answer?: string; questions?: string[]; keywords?: string[]; red_flag?: boolean }[]): FactRow[] {
+  return facts.map((f) => ({
+    topic: f.topic ?? "", answer: f.answer ?? "", questions: (f.questions ?? []).join("\n"),
+    keywords: (f.keywords ?? []).join(", "), red_flag: !!f.red_flag,
+  }));
+}
+
+export default function FactsBuilderDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+  const [label, setLabel] = useState("");
+  const [rows, setRows] = useState<FactRow[]>([emptyRow()]);
+  const [augment, setAugment] = useState(true);
+  const [defaults, setDefaults] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [preview, setPreview] = useState<{ stats: { train: number; eval: number; skipped: number }; train_sample: { instruction: string }[] } | null>(null);
+
+  const facts = rowsToFacts(rows);
+  const patch = (i: number, p: Partial<FactRow>) => { setPreview(null); setRows((rs) => rs.map((r, j) => (j === i ? { ...r, ...p } : r))); };
+
+  async function loadTemplate() {
+    try {
+      const t = await api.dsFactsTemplate();
+      setRows(factsToRows(t)); setPreview(null);
+      if (!label) setLabel("FAQ ตัวอย่าง (แก้เป็นของเรา)");
+      toast("โหลดตัวอย่างแล้ว แก้ข้อความเป็นข้อมูลจริงของเราได้เลย");
+    } catch (e) { toast(errText(e), "bad"); }
+  }
+  async function doPreview() {
+    try { setPreview(await api.dsFactsPreview(facts, augment, defaults)); } catch (e) { toast(errText(e), "bad"); }
+  }
+  async function create() {
+    setBusy(true);
+    try {
+      const r = await api.dsFromFacts(label.trim(), facts, augment, defaults);
+      toast(`สร้างชุดข้อมูล ${r.examples} ตัวอย่าง และเพิ่มโจทย์ทดสอบ ${r.eval_added} ข้อแล้ว`);
+      onDone();
+    } catch (e) { toast(errText(e), "bad"); } finally { setBusy(false); }
+  }
+
+  return (
+    <Modal title="สร้างชุดข้อมูลจากตารางข้อเท็จจริง" onClose={onClose} wide
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>ยกเลิก</Button>
+        <Button variant="secondary" onClick={doPreview} disabled={facts.length === 0}><Eye size={14} /> ดูตัวอย่าง</Button>
+        <Button onClick={create} disabled={busy || !label.trim() || facts.length === 0}>{busy ? "กำลังสร้าง..." : "สร้าง"}</Button>
+      </>}>
+      <Notice tone="info">
+        <div className="space-y-1">
+          <div className="font-medium">วิธีใช้: ใส่ข้อเท็จจริงทีละเรื่อง แล้วระบบทำส่วนที่เหลือให้</div>
+          <div>1) ใส่ <b>คำตอบมาตรฐาน</b> ของเรื่องนั้น  2) ใส่ <b>คำถามหลายแบบ</b> (บรรทัดละข้อ ยิ่งหลากหลายยิ่งดี อย่างน้อย 5-8 แบบ)  3) ใส่ <b>คำสำคัญ</b> ที่คำตอบต้องมี เช่นเบอร์โทร/เวลา</div>
+          <div>คำถามข้อสุดท้ายของแต่ละเรื่องจะถูกกันไว้เป็นข้อสอบ (ไม่เอาไปเทรน) พร้อมเกณฑ์ตรวจจากคำสำคัญ ไม่ต้องไปสร้างโจทย์ทดสอบเอง</div>
+        </div>
+      </Notice>
+
+      <div className="flex flex-wrap gap-2">
+        <Button variant="secondary" className="text-xs py-1.5" onClick={loadTemplate}><FileText size={13} /> โหลดตัวอย่าง (ข้อมูลสมมติ)</Button>
+        <Button variant="secondary" className="text-xs py-1.5" onClick={() => setRows((r) => [...r, emptyRow()])}><Plus size={13} /> เพิ่มเรื่อง</Button>
+      </div>
+
+      <Field label="ชื่อชุดข้อมูล"><TextInput value={label} onChange={(e) => setLabel(e.target.value)} placeholder="เช่น FAQ บริการผู้ป่วยนอก ต.ค." /></Field>
+
+      <div className="space-y-3">
+        {rows.map((r, i) => (
+          <div key={i} className="border border-base-800 rounded-lg p-3 space-y-2.5">
+            <div className="flex items-center gap-2">
+              <TextInput value={r.topic} onChange={(e) => patch(i, { topic: e.target.value })} placeholder={`เรื่องที่ ${i + 1}: หัวข้อ เช่น เวลาทำการ`} />
+              <button className="text-base-500 hover:text-bad shrink-0 p-1.5" onClick={() => { setPreview(null); setRows((rs) => rs.length > 1 ? rs.filter((_, j) => j !== i) : [emptyRow()]); }} aria-label="ลบเรื่องนี้"><Trash2 size={15} /></button>
+            </div>
+            <TextArea rows={2} value={r.answer} onChange={(e) => patch(i, { answer: e.target.value })} placeholder="คำตอบมาตรฐาน เช่น OPD เปิดจันทร์-ศุกร์ 08.00-16.00 น. ค่ะ" />
+            <TextArea rows={4} value={r.questions} onChange={(e) => patch(i, { questions: e.target.value })} placeholder={"คำถามบรรทัดละข้อ เช่น\nเปิดกี่โมง\nวันเสาร์เปิดไหม\nขอทราบเวลาทำการ"} />
+            <div className="grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-end">
+              <Field label="คำสำคัญที่คำตอบต้องมี (คั่นด้วย comma)"><TextInput value={r.keywords} onChange={(e) => patch(i, { keywords: e.target.value })} placeholder="เช่น 08.00, 16.00" /></Field>
+              <Toggle checked={r.red_flag} onChange={(v) => patch(i, { red_flag: v })} label="เคสอันตราย (red flag)" />
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="space-y-3">
+        <Toggle checked={augment} onChange={(v) => { setAugment(v); setPreview(null); }} label="ขยายสำนวนคำถามอัตโนมัติ" hint="เติมคำนำหน้า เช่น ขอสอบถามหน่อย เพื่อให้โมเดลเจอคำถามหลายสำนวน (แนะนำให้เปิด)" />
+        <Toggle checked={defaults} onChange={(v) => { setDefaults(v); setPreview(null); }} label="เติมตัวอย่างพื้นฐาน" hint="ทักทาย, ไม่วินิจฉัยโรค, ถามนอกขอบเขตให้ตอบว่าไม่ทราบ (ช่วยลดการแต่งข้อมูลเอง แนะนำให้เปิด)" />
+      </div>
+
+      {preview && (
+        <Notice tone="good">
+          <div className="space-y-1">
+            <div className="font-medium">จะได้ตัวอย่างเทรน {preview.stats.train} ข้อ และโจทย์ทดสอบ {preview.stats.eval} ข้อ{preview.stats.skipped > 0 && ` (ข้าม ${preview.stats.skipped} แถวที่ยังกรอกไม่ครบ)`}</div>
+            {preview.train_sample.slice(0, 4).map((t, i) => <div key={i} className="text-base-300 truncate">• {t.instruction}</div>)}
+          </div>
+        </Notice>
+      )}
+      <div className="flex items-center gap-1.5 text-[11px] text-base-500"><Wand2 size={12} /> ใช้ได้โดยไม่ต้องมี Gemini key ข้อมูลทั้งหมดอยู่ในเครื่อง</div>
+    </Modal>
+  );
+}

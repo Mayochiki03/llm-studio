@@ -10,6 +10,8 @@ import type {
   QAPair,
   Settings,
   Hardware,
+  Gpu,
+  GpuLive,
   PreflightResult,
   QueueInfo,
   KbDoc,
@@ -245,6 +247,9 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
 
   dashboard: () => req<Dashboard>("/dashboard"),
   hardware: () => req<Hardware>("/system/hardware"),
+  gpuLive: () => req<GpuLive>("/system/gpu-live"),
+  jobAiDigest: (id: string) => req<{ digest: unknown; prompt: string; configured: boolean }>(`/jobs/${id}/ai-digest`),
+  jobAiSummary: (id: string) => post<{ ok: boolean; text?: string; error?: string }>(`/jobs/${id}/ai-summary`, { confirm: true }),
   preflight: (body: { base_model: string; max_seq_length: number; batch_size?: number; export_after?: boolean }) =>
     post<PreflightResult>("/preflight", body),
   queue: () => req<QueueInfo>("/queue"),
@@ -326,6 +331,11 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   dsAppend: (id: string, examples: QAPair[], note = "") => post<any>(`/datasets/${id}/append`, { examples, note }),
   dsRestore: (id: string, version: number) => post<any>(`/datasets/${id}/restore`, { version }),
   dsFromKb: (label: string, notes = "") => post<any>("/datasets/from-kb", { label, notes }),
+  dsFactsTemplate: () => req<{ topic: string; answer: string; questions: string[]; keywords: string[]; red_flag?: boolean }[]>("/datasets/facts-template"),
+  dsFactsPreview: (facts: unknown[], augment = true, include_defaults = true) =>
+    post<{ stats: { train: number; eval: number; skipped: number }; train_sample: { instruction: string }[] }>("/datasets/facts-preview", { label: "x", facts, augment, include_defaults }),
+  dsFromFacts: (label: string, facts: unknown[], augment = true, include_defaults = true) =>
+    post<{ dataset_id: string; examples: number; eval_added: number }>("/datasets/from-facts", { label, facts, augment, include_defaults, add_eval: true }),
 
   // ทะเบียนโมเดล
   registry: () => req<ModelVersion[]>("/registry"),

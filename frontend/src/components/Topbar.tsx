@@ -24,7 +24,7 @@ export default function Topbar({ title, subtitle }: { title: string; subtitle?: 
     <header className="h-16 shrink-0 border-b border-base-800 bg-base-950/80 backdrop-blur px-4 md:px-8 flex items-center justify-between">
       <div className="flex items-center gap-3 min-w-0">
         <button
-          className="md:hidden text-base-300 hover:text-base-100 shrink-0"
+          className="lg:hidden text-base-300 hover:text-base-100 shrink-0"
           onClick={() => window.dispatchEvent(new Event("toggle-nav"))}
           aria-label="เปิดเมนู"
         >

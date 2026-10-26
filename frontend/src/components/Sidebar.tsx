@@ -98,13 +98,13 @@ export default function Sidebar() {
 
   return (
     <>
-      <aside className="hidden md:flex w-64 shrink-0 flex-col border-r border-base-800 bg-base-900">
+      <aside className="hidden lg:flex w-60 xl:w-64 shrink-0 flex-col border-r border-base-800 bg-base-900">
         <Brand />
         <Nav />
       </aside>
 
       {open && (
-        <div className="md:hidden fixed inset-0 z-40 flex">
+        <div className="lg:hidden fixed inset-0 z-40 flex">
           <div className="absolute inset-0 bg-black/60" onClick={() => setOpen(false)} />
           <aside className="relative w-72 max-w-[85%] flex flex-col bg-base-900 border-r border-base-800 h-full">
             <button onClick={() => setOpen(false)} className="absolute top-4 right-3 text-base-400 hover:text-base-100" aria-label="ปิดเมนู">

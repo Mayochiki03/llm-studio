@@ -118,6 +118,30 @@ describe("Playground", () => {
   });
 });
 
+describe("Playground จำบทสนทนาข้ามหน้า", () => {
+  it("ถามแล้วสลับไปหน้าอื่น กลับมายังเห็นคำถามและคำตอบเดิม", async () => {
+    installFetch({
+      "POST /api/playground/chat": () => ndjson([{ type: "delta", text: "คำตอบทดสอบ" }, { type: "done", total_s: 1, tokens_per_s: 5 }]),
+    });
+    sessionStorage.clear();
+    localStorage.clear();
+    const { unmount } = render(<MemoryRouter initialEntries={["/playground"]}><App /></MemoryRouter>);
+    await act(async () => { await new Promise((r) => setTimeout(r, 60)); });
+    const box = await screen.findByPlaceholderText(/พิมพ์|ถาม/);
+    fireEvent.change(box, { target: { value: "คำถามที่ต้องจำ" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+    await screen.findByText("คำตอบทดสอบ");
+    unmount();
+    // เปิดใหม่ (เหมือนกลับมาจากหน้าอื่น)
+    await open("/playground");
+    expect(screen.getByText("คำถามที่ต้องจำ")).toBeTruthy();
+    expect(screen.getByText("คำตอบทดสอบ")).toBeTruthy();
+    // กดล้างแล้วต้องหาย
+    fireEvent.click(screen.getByText("ล้างบทสนทนา"));
+    expect(screen.queryByText("คำถามที่ต้องจำ")).toBeNull();
+  });
+});
+
 describe("การเข้าสู่ระบบ", () => {
   it("เปิดล็อกอินและยังไม่มีโทเคน → ขึ้นหน้ากรอกรหัส ไม่ใช่จอว่าง", async () => {
     installFetch({ "GET /api/auth/status": { enabled: true } });

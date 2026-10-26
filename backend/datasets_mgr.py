@@ -204,3 +204,22 @@ def from_kb(label: str, notes: str = "") -> dict:
     if not pairs:
         raise ValueError("ในคลังความรู้ยังไม่มีเอกสารแบบคู่ถาม-ตอบที่เปิดใช้งาน")
     return create_dataset(label, notes or "สร้างจากคู่ถาม-ตอบในคลังความรู้", pairs, source="kb")
+
+
+def from_facts(label: str, notes: str, facts: list[dict], augment: bool = True,
+               include_defaults: bool = True, add_eval: bool = True) -> dict:
+    """สร้างชุดข้อมูลเทรน (และโจทย์ทดสอบที่ใช้คำสำคัญเดียวกัน) จากตารางข้อเท็จจริง (ดู faqbuilder.py)"""
+    import faqbuilder
+    r = faqbuilder.build(facts, augment=augment, include_defaults=include_defaults)
+    if not r["train"]:
+        raise ValueError("ไม่มีตัวอย่างให้สร้าง: แต่ละแถวต้องมีคำตอบและคำถามอย่างน้อย 1 ข้อ")
+    res = create_dataset(label, notes or "สร้างจากตารางข้อเท็จจริง", r["train"], source="facts")
+    added = 0
+    if add_eval:
+        have = {p["text"] for p in store.list_prompts()}
+        for p in r["eval"]:
+            if p["text"] not in have:
+                store.add_prompt(p["text"], p["category"], p["expect"], p["must_not"], p["red_flag"], p["pinned"])
+                added += 1
+    return {"dataset_id": res["dataset_id"], "examples": res["count"], "pii": res.get("pii"),
+            "eval_added": added, "stats": r["stats"]}

@@ -129,14 +129,13 @@ async def _call_model(client: httpx.AsyncClient, model: str, api_key: str, promp
     raise last_error or AIProviderError("เรียก Gemini API ไม่สำเร็จ")
 
 
-async def generate_qa_pairs(raw_text: str, num_pairs: int = 8) -> list[dict]:
+async def _generate(prompt: str) -> str:
+    """ส่ง prompt ให้ Gemini (ลองรุ่นตามลำดับ จำรุ่นที่ใช้ได้) แล้วคืนข้อความตอบกลับดิบ"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise AIProviderError(
             "ยังไม่ได้ตั้งค่า GEMINI_API_KEY — ใส่ในไฟล์ backend/.env แล้ว restart backend ก่อน"
         )
-
-    prompt = PROMPT_TEMPLATE.format(num_pairs=num_pairs, raw_text=raw_text.strip()[:8000])
 
     global _working_model
     models_to_try = [_working_model] if _working_model else list(_CANDIDATE_MODELS)
@@ -159,9 +158,19 @@ async def generate_qa_pairs(raw_text: str, num_pairs: int = 8) -> list[dict]:
 
     assert data is not None
     try:
-        text = data["candidates"][0]["content"]["parts"][0]["text"]
+        return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError):
         raise AIProviderError(f"รูปแบบคำตอบจาก Gemini ไม่ตรงตามที่คาด: {json.dumps(data)[:300]}")
+
+
+async def generate_text(prompt: str) -> str:
+    """ใช้กับฟีเจอร์อื่นที่ต้องการข้อความตอบกลับธรรมดา (เช่น สรุปผลเทรน)"""
+    return (await _generate(prompt)).strip()
+
+
+async def generate_qa_pairs(raw_text: str, num_pairs: int = 8) -> list[dict]:
+    prompt = PROMPT_TEMPLATE.format(num_pairs=num_pairs, raw_text=raw_text.strip()[:8000])
+    text = await _generate(prompt)
 
     pairs = _extract_json_array(text)
     cleaned = []

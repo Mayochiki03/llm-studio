@@ -1,7 +1,7 @@
 // รายงาน error ของหน้าเว็บไปเก็บที่ backend (studio_data/logs/client.log) เพื่อไล่หาสาเหตุอาการ "หน้าจอว่าง"
 // ไม่ส่งข้อมูลที่ผู้ใช้พิมพ์หรือเนื้อหาคำตอบ ส่งเฉพาะข้อความ error, stack, หน้าที่เปิดอยู่ และขนาดจอ
 
-export const APP_UI_VERSION = "0.6.8";
+export const APP_UI_VERSION = "0.7.3";
 
 interface Entry {
   kind: string;

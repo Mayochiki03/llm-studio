@@ -136,6 +136,28 @@ async def system_hardware():
     return hw
 
 
+@router.get("/system/gpu-live")
+def system_gpu_live():
+    """ค่าเครื่องแบบเบา (nvidia-smi + psutil ไม่ถาม Ollama) ให้หน้างานเทรนดึงทุก 3 วินาที
+    คืน gpu (null ถ้าไม่มีการ์ด/อ่านไม่ได้), CPU %, RAM, และตัวนับไบต์เครือข่ายรวมทั้งเครื่อง (หน้าเว็บคำนวณเป็นความเร็วเอง)
+    เป็นตัวเลขภาพรวมของเครื่อง ไม่ได้แยกตามโปรเซส และไม่มีข้อมูลผู้ใช้/ข้อความใดๆ"""
+    gpus = hardware.probe_gpus()
+    out: dict = {"gpu": gpus[0] if gpus else None, "ts": time.time(), "cpu_pct": None,
+                 "ram_used_gb": None, "ram_total_gb": None, "net_rx": None, "net_tx": None}
+    ps = hardware.psutil
+    if ps is not None:
+        try:
+            out["cpu_pct"] = ps.cpu_percent(interval=None)
+            vm = ps.virtual_memory()
+            out["ram_used_gb"] = round((vm.total - vm.available) / 1e9, 1)
+            out["ram_total_gb"] = round(vm.total / 1e9, 1)
+            nc = ps.net_io_counters()
+            out["net_rx"], out["net_tx"] = nc.bytes_recv, nc.bytes_sent
+        except Exception:
+            pass
+    return out
+
+
 class PreflightBody(BaseModel):
     base_model: str
     max_seq_length: int = 512
@@ -503,6 +525,42 @@ def datasets_from_kb(body: FromKBBody):
         return datasets_mgr.from_kb(body.label, body.notes)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+class FromFactsBody(BaseModel):
+    label: str
+    notes: str = ""
+    facts: list[dict]
+    augment: bool = True
+    include_defaults: bool = True
+    add_eval: bool = True
+
+
+@router.post("/datasets/from-facts")
+def datasets_from_facts(body: FromFactsBody):
+    """สร้างชุดข้อมูลจากตารางข้อเท็จจริง + เพิ่มโจทย์ทดสอบที่ใช้คำสำคัญเดียวกัน (ไม่ใช้ AI)"""
+    if not body.label.strip():
+        raise HTTPException(400, "ตั้งชื่อชุดข้อมูลก่อน")
+    try:
+        return datasets_mgr.from_facts(body.label.strip(), body.notes, body.facts, body.augment,
+                                       body.include_defaults, body.add_eval)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.post("/datasets/facts-preview")
+def datasets_facts_preview(body: FromFactsBody):
+    """ดูตัวอย่างก่อนสร้าง: จำนวนตัวอย่างเทรน/ข้อสอบ และตัวอย่างบางส่วน (ยังไม่บันทึกอะไร)"""
+    import faqbuilder
+    r = faqbuilder.build(body.facts, body.augment, body.include_defaults)
+    return {"stats": r["stats"], "train_sample": r["train"][:6], "eval": r["eval"]}
+
+
+@router.get("/datasets/facts-template")
+def datasets_facts_template():
+    """ตารางข้อเท็จจริงตัวอย่าง (สมมติ) ให้กดโหลดมาแก้เป็นของตัวเอง"""
+    f = Path(__file__).resolve().parent.parent / "samples" / "pack-02" / "facts.json"
+    return json.loads(f.read_text(encoding="utf-8")) if f.exists() else []
 
 
 # ====================================================================== ทะเบียนโมเดล

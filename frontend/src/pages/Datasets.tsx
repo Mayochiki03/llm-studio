@@ -1,10 +1,11 @@
 // ชุดข้อมูลเทรนของเรา: ดูตัวอย่าง ตรวจข้อมูลระบุตัวตน (PII) เพิ่มตัวอย่าง ดู/ย้อนเวอร์ชัน และสร้างจากคลังความรู้
 import { useCallback, useEffect, useState } from "react";
-import { Database, Plus, ShieldAlert, ShieldCheck, History, Eye, BookOpen, PlusCircle } from "lucide-react";
+import { Database, Plus, ShieldAlert, ShieldCheck, History, Eye, BookOpen, PlusCircle, Table2 } from "lucide-react";
 import Topbar from "../components/Topbar";
 import { Card } from "../components/Card";
 import Button from "../components/Button";
 import CustomDatasetDialog from "../components/CustomDatasetDialog";
+import FactsBuilderDialog from "../components/FactsBuilderDialog";
 import { Empty, Field, Modal, Notice, Pill, Spinner, TextArea, TextInput, fmtDate } from "../components/ui";
 import { toast, errText } from "../components/toast";
 import { api } from "../api/client";
@@ -16,6 +17,7 @@ export default function Datasets() {
   const [items, setItems] = useState<DatasetOption[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [fromKb, setFromKb] = useState(false);
+  const [facts, setFacts] = useState(false);
   const [detail, setDetail] = useState<DatasetOption | null>(null);
 
   const load = useCallback(() => {
@@ -31,7 +33,8 @@ export default function Datasets() {
           <div>ชุดข้อมูลของโรงพยาบาลต้องไม่มีข้อมูลระบุตัวตนผู้ป่วยจริง (เลขบัตร, HN, เบอร์โทร, อีเมล) ระบบจะสแกนให้ทุกครั้งและบล็อกการเทรนถ้าพบ</div>
         </Notice>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={() => setCreating(true)}><Plus size={15} /> สร้างชุดข้อมูลใหม่</Button>
+          <Button onClick={() => setFacts(true)}><Table2 size={15} /> สร้างจากตารางข้อเท็จจริง (แนะนำ)</Button>
+          <Button variant="secondary" onClick={() => setCreating(true)}><Plus size={15} /> สร้างชุดข้อมูลใหม่</Button>
           <Button variant="secondary" onClick={() => setFromKb(true)}><BookOpen size={14} /> สร้างจากคู่ถาม-ตอบในคลังความรู้</Button>
         </div>
 
@@ -53,6 +56,7 @@ export default function Datasets() {
       </div>
 
       {creating && <CustomDatasetDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
+      {facts && <FactsBuilderDialog onClose={() => setFacts(false)} onDone={() => { setFacts(false); load(); }} />}
       {fromKb && <FromKbDialog onClose={() => setFromKb(false)} onDone={() => { setFromKb(false); load(); }} />}
       {detail && <DetailDialog ds={detail} onClose={() => setDetail(null)} />}
     </div>

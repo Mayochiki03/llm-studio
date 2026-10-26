@@ -178,8 +178,10 @@ class Job:
             if val is not None:
                 pt["val_loss"] = val
             return
-        if loss is None:
-            return  # มีแต่ validation ที่ยังไม่มีจุดรองรับ ข้าม
+        if loss is None and val is None:
+            return
+        # มีแต่ validation (step ที่ตรวจไม่ตรงกับ step ที่พิมพ์ train loss) ก็เก็บเป็นจุดของตัวเอง loss เป็น None
+        # (เดิมทิ้งไป ทำให้กราฟและตัวสรุป AI ไม่เห็น val_loss เลย)
         pt = {"step": step, "loss": loss}
         if val is not None:
             pt["val_loss"] = val
@@ -190,9 +192,10 @@ class Job:
         1) บรรทัด LLM_STUDIO_LOSS {json} ที่สคริปต์เทรนพิมพ์เอง (แม่นที่สุด ใช้กับงานใหม่)
         2) ตารางเก่า "Step  Training Loss [Validation Loss]" ของ trl
         3) บรรทัด dict แบบ {'loss': '1.06', ...} ของ transformers รุ่นใหม่ (ไม่มีเลข step ในบรรทัด ใช้เลขจากแถบ tqdm ล่าสุด)"""
-        if line.startswith("LLM_STUDIO_LOSS "):
+        mk = line.find("LLM_STUDIO_LOSS ")
+        if mk >= 0:  # หาจากกลางบรรทัดได้ เพราะแถบ tqdm ไม่ขึ้นบรรทัดใหม่ บรรทัด loss เลยไปติดท้ายแถบ
             try:
-                o = json.loads(line[len("LLM_STUDIO_LOSS "):])
+                o = json.loads(line[mk + len("LLM_STUDIO_LOSS "):])
                 self._add_point(int(o["step"]),
                                 float(o["loss"]) if o.get("loss") is not None else None,
                                 float(o["val_loss"]) if o.get("val_loss") is not None else None)
@@ -224,6 +227,31 @@ class Job:
 
 _TQDM_STEP = re.compile(r"(\d+)/\d+ \[")
 _DICT_LOSS = re.compile(r"['\"]loss['\"]\s*:\s*['\"]?([0-9]+(?:\.[0-9]+)?(?:e-?[0-9]+)?)")
+
+# สาเหตุที่พบบ่อยของงานเทรนล้ม → คำอธิบายภาษาไทยพร้อมวิธีแก้ (ดูจากท้าย log) ไว้แสดงแทนข้อความ exit code เฉยๆ
+_FAILURE_HINTS = [
+    ("No or negligible GPU memory", "VRAM ไม่พอ (การ์ดจอเต็ม) — ปิดโปรแกรมที่ใช้การ์ดจอ (เบราว์เซอร์หลายแท็บ, โมเดลค้างใน Ollama: รัน `ollama ps` แล้ว `ollama stop <ชื่อ>`) แล้วกดรันต่อ ถ้ายังไม่พอ ลดความยาวข้อความสูงสุดหรือเลือกโมเดลเล็กลง"),
+    ("CUDA out of memory", "VRAM ไม่พอ (CUDA out of memory) — ปิดโปรแกรมที่ใช้การ์ดจอ ลดความยาวข้อความสูงสุด หรือเลือกโมเดลเล็กลง แล้วกดรันต่อ"),
+    ("You need a GPU", "Python มองไม่เห็นการ์ดจอ — น่าจะติดตั้ง PyTorch รุ่น CPU: ตรวจด้วย python -c \"import torch; print(torch.cuda.is_available())\" ต้องได้ True (ติดตั้งรุ่น CUDA ของ torch ใหม่)"),
+    ("Failed to find C compiler", "ไม่พบตัวคอมไพล์ C ที่ Triton ต้องใช้บน Windows — ติดตั้ง Visual Studio Build Tools (Desktop development with C++) แล้วเปิด backend จาก Developer PowerShell"),
+    ("getaddrinfo failed", "เน็ตหลุดหรือ DNS ล่มระหว่างดาวน์โหลดโมเดล/ชุดข้อมูล — ตรวจอินเทอร์เน็ตแล้วกด \"กลับมารันต่อ\" (ไฟล์ที่โหลดแล้วไม่ต้องโหลดซ้ำ)"),
+    ("The read operation timed out", "เน็ตช้าจนหมดเวลาตอนดาวน์โหลด — กด \"กลับมารันต่อ\" อีกครั้งเมื่อเน็ตนิ่ง"),
+    ("CERTIFICATE_VERIFY_FAILED", "ใบรับรอง SSL ไม่ผ่าน (มักเกิดจากไฟร์วอลล์ที่ตรวจ HTTPS) — ดูหัวข้อ SSL ใน README"),
+    ("No space left on device", "ดิสก์เต็ม — ล้างพื้นที่ที่หน้า \"เครื่องและพื้นที่\" แล้วกดรันต่อ"),
+]
+
+
+def explain_failure(lines: list[str]) -> str:
+    """หาสาเหตุที่รู้จักจากท้าย log คืนข้อความไทยหรือสตริงว่างถ้าไม่รู้จัก"""
+    tail = "\n".join(lines[-80:])
+    for needle, hint in _FAILURE_HINTS:
+        if needle in tail:
+            return hint
+    return ""
+
+
+# รหัสควบคุมเทอร์มินัล (เช่น ESC[A ที่ tqdm ใช้เลื่อนเคอร์เซอร์ขึ้น) ไม่มีความหมายในหน้าเว็บ จะแสดงเป็นกล่องแปลกๆ จึงตัดทิ้ง
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b")
 
 _SPLIT_LINES = re.compile(r"[\r\n]+")
 
@@ -336,6 +364,9 @@ async def pump_process(job: "Job", proc: subprocess.Popen, loop: asyncio.Abstrac
         stuck_msg_count = 0
         last_io = _io_bytes()
         for line in batch:
+            line = _ANSI.sub("", line)
+            if not line.strip():
+                continue
             n_loss = len(job.loss_points)
             prev_last = dict(job.loss_points[-1]) if job.loss_points else None
             job.push_log(line)
@@ -619,7 +650,8 @@ class JobManager:
             job.status = "done"
         else:
             job.status = "failed"
-            job.error = f"กระบวนการเทรนจบด้วย exit code {code} — ดู log ด้านบนสำหรับรายละเอียด"
+            hint = explain_failure(job.log_lines)
+            job.error = f"กระบวนการเทรนจบด้วย exit code {code} — " + (f"สาเหตุที่น่าจะเป็น: {hint}" if hint else "ดู log ด้านบนสำหรับรายละเอียด")
         job.finished_at = time.time()
         job.updated_at = job.finished_at
         job.process = None
@@ -858,12 +890,27 @@ class _LossPrinter(TrainerCallback):
         if _l is None and _v is None:
             return
         try:
-            print("LLM_STUDIO_LOSS " + json.dumps({"step": int(state.global_step),
+            print("\nLLM_STUDIO_LOSS " + json.dumps({"step": int(state.global_step),
                   "loss": float(_l) if _l is not None else None,
                   "val_loss": float(_v) if _v is not None else None}), flush=True)
         except (TypeError, ValueError):
             pass
 trainer.add_callback(_LossPrinter())
+
+# การ์ด VRAM น้อย (4GB): หลังรอบ validation และหลังบันทึก checkpoint หน่วยความจำที่ cache ค้างอาจทำให้ step ถัดไปล้มด้วย
+# "No or negligible GPU memory" จึงเคลียร์ cache ทุกครั้งหลังสองขั้นตอนนี้
+import gc as _gc
+import torch as _torch
+class _FreeVram(TrainerCallback):
+    def _free(self):
+        _gc.collect()
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+    def on_evaluate(self, args, state, control, **kwargs):
+        self._free()
+    def on_save(self, args, state, control, **kwargs):
+        self._free()
+trainer.add_callback(_FreeVram())
 
 import os as _os
 _resume_checkpoint = None

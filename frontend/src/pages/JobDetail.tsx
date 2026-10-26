@@ -6,6 +6,8 @@ import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
 import StatusBadge from "../components/StatusBadge";
 import LogViewer from "../components/LogViewer";
+import GpuMonitor from "../components/GpuMonitor";
+import AiSummaryCard from "../components/AiSummaryCard";
 import { api } from "../api/client";
 import type { Job } from "../types";
 import { ChevronLeft, Download, Package, Trash2, MessageSquare, PlayCircle, ArrowUpToLine } from "lucide-react";
@@ -18,7 +20,7 @@ export default function JobDetail() {
   const [job, setJob] = useState<Job | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [logLines, setLogLines] = useState<string[]>([]);
-  const [lossPoints, setLossPoints] = useState<{ step: number; loss: number; val_loss?: number }[]>([]);
+  const [lossPoints, setLossPoints] = useState<{ step: number; loss: number | null; val_loss?: number | null }[]>([]);
   const [queue, setQueue] = useState<QueueInfo | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
@@ -87,7 +89,7 @@ export default function JobDetail() {
   const isDone = job.status === "done";
   const isRunning = ["training", "exporting", "creating_ollama", "queued", "scheduled"].includes(job.status);
   const waitPos = queue?.waiting.find((w) => w.id === job.id)?.position;
-  const hasVal = lossPoints.some((p) => p.val_loss !== undefined);
+  const hasVal = lossPoints.some((p) => p.val_loss != null);
 
   async function doExport() {
     if (!id) return;
@@ -238,9 +240,13 @@ export default function JobDetail() {
           </div>
         </Card>
 
+        <GpuMonitor active={job.status === "training"} logLines={logLines} />
+
         {job.error && (
           <div className="text-sm text-bad bg-bad/10 border border-bad/20 rounded-lg px-4 py-3">{job.error}</div>
         )}
+
+        {id && !isRunning && lossPoints.length > 0 && <AiSummaryCard jobId={id} />}
 
         <Card>
           <CardHeader title="Loss ระหว่างเทรน" subtitle={`${lossPoints.length} จุดข้อมูล${hasVal ? " · เส้นส้ม = loss ของชุดตรวจสอบ (ถ้าเริ่มสูงขึ้นขณะเส้นฟ้าลง แปลว่าโมเดลเริ่มท่องจำ)" : ""}`} />
@@ -254,7 +260,7 @@ export default function JobDetail() {
                   <Tooltip
                     contentStyle={{ background: "#131a24", border: "1px solid #232d3d", borderRadius: 8, fontSize: 12 }}
                   />
-                  <Line type="monotone" dataKey="loss" name="train" stroke="#4f8cff" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="loss" name="train" stroke="#4f8cff" strokeWidth={2} dot={false} connectNulls />
                   {hasVal && <Line type="monotone" dataKey="val_loss" name="validation" stroke="#fbbf24" strokeWidth={2} dot connectNulls />}
                 </LineChart>
               </ResponsiveContainer>

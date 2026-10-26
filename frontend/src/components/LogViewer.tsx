@@ -1,5 +1,10 @@
 import { useEffect, useRef } from "react";
 
+// ตัดรหัสควบคุมเทอร์มินัล (ESC[A ฯลฯ) ที่เหลือมาใน log เก่า ไม่งั้นแสดงเป็นกล่องแปลกๆ
+// eslint-disable-next-line no-control-regex
+const ANSI = /\u001b\[[0-9;?]*[A-Za-z]|\u001b/g;
+export const cleanLogLine = (l: string) => l.replace(ANSI, "");
+
 export default function LogViewer({ lines }: { lines: string[] }) {
   const ref = useRef<HTMLDivElement>(null);
 
@@ -17,7 +22,7 @@ export default function LogViewer({ lines }: { lines: string[] }) {
       ) : (
         lines.map((l, i) => (
           <div key={i} className="text-base-300">
-            {l}
+            {cleanLogLine(l)}
           </div>
         ))
       )}

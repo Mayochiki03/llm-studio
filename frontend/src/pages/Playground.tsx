@@ -20,15 +20,42 @@ interface Msg {
   error?: boolean;
 }
 
+// เก็บบทสนทนาและตัวเลือกไว้ใน localStorage ของเบราว์เซอร์: สลับหน้า เปิดแท็บใหม่ หรือปิดเปิดเบราว์เซอร์แล้วยังอยู่
+// (เดิมใช้ sessionStorage ซึ่งหายทันทีเมื่อเปิดแท็บใหม่) เก็บเฉพาะในเครื่องนี้ ล้างได้ด้วยปุ่ม "ล้างบทสนทนา"
+// จำกัดแค่ข้อความล่าสุด MAX_KEEP ข้อความ กันเต็มโควตา ห่อ try/catch เผื่อเบราว์เซอร์ปิดการเก็บข้อมูล
+const SAVE_KEY = "llmstudio.playground.v1";
+const MAX_KEEP = 100;
+interface Saved { msgs: Msg[]; model: string; useKb: boolean; system: string | null; temp: number; input: string }
+
+function loadSaved(): Partial<Saved> {
+  try {
+    // รองรับข้อมูลเก่าที่ยังค้างใน sessionStorage ของแท็บนี้ด้วย
+    const raw = localStorage.getItem(SAVE_KEY) ?? sessionStorage.getItem(SAVE_KEY);
+    if (!raw) return {};
+    const o = JSON.parse(raw) as Partial<Saved>;
+    const msgs = Array.isArray(o.msgs) ? o.msgs.filter((m) => m && typeof m.content === "string" && (m.role === "user" || m.role === "assistant")) : [];
+    // ถ้าออกจากหน้าตอนโมเดลยังตอบไม่จบ จะเหลือข้อความว่าง/ค้างครึ่งทาง: ทำเครื่องหมายให้รู้ว่าถูกตัด
+    const last = msgs[msgs.length - 1];
+    if (last && last.role === "assistant" && !last.stats && !last.error) {
+      last.content = (last.content || "") + (last.content ? "\n\n" : "") + "(ถูกตัดเพราะออกจากหน้าก่อนตอบจบ)";
+      last.error = !last.content.trim() ? true : false;
+    }
+    return { ...o, msgs };
+  } catch {
+    return {};
+  }
+}
+
 export default function Playground() {
+  const saved = useRef<Partial<Saved>>(loadSaved()).current;
   const [models, setModels] = useState<string[]>([]);
-  const [model, setModel] = useState("");
-  const [useKb, setUseKb] = useState(true);
-  const [system, setSystem] = useState("");
-  const [temp, setTemp] = useState(0.7);
+  const [model, setModel] = useState(saved.model ?? "");
+  const [useKb, setUseKb] = useState(saved.useKb ?? true);
+  const [system, setSystem] = useState(saved.system ?? "");
+  const [temp, setTemp] = useState(typeof saved.temp === "number" ? saved.temp : 0.7);
   const [showOpts, setShowOpts] = useState(false);
-  const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [input, setInput] = useState("");
+  const [msgs, setMsgs] = useState<Msg[]>(saved.msgs ?? []);
+  const [input, setInput] = useState(saved.input ?? "");
   const [busy, setBusy] = useState(false);
   const [ollamaDown, setOllamaDown] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -44,15 +71,30 @@ export default function Playground() {
         // ถ้ามีโมเดลที่ตั้งเป็นใช้งานจริงในทะเบียน ให้เลือกตัวนั้นก่อน
         api.registry().then((v) => {
           const act = v.find((x) => x.status === "active")?.name;
-          setModel(act && names.includes(act) ? act : names[0] ?? "");
-        }).catch(() => setModel(names[0] ?? ""));
+          // ใช้โมเดลที่เลือกไว้รอบก่อนถ้ายังมีอยู่ ไม่งั้นใช้ตัวที่ตั้งเป็นใช้งานจริง
+          setModel((prev) => (prev && names.includes(prev) ? prev : act && names.includes(act) ? act : names[0] ?? ""));
+        }).catch(() => setModel((prev) => (prev && names.includes(prev) ? prev : names[0] ?? "")));
       })
       .catch((e) => {
         reportError("playground.models", e);
         setOllamaDown(true);
       });
-    api.settings().then((s) => setSystem(s.default_system_prompt)).catch(() => {});
+    // system prompt เริ่มต้นจากตั้งค่า เฉพาะเมื่อผู้ใช้ยังไม่เคยแก้ในรอบนี้
+    api.settings().then((s) => setSystem((prev) => (saved.system ? prev : s.default_system_prompt))).catch(() => {});
+    // ออกจากหน้าตอนกำลังสตรีมอยู่: ยกเลิกคำขอ กันค้างเบื้องหลังและกัน setState หลังหน้าปิด
+    return () => abortRef.current?.abort();
   }, []);
+
+  // บันทึกสถานะทุกครั้งที่เปลี่ยน
+  useEffect(() => {
+    try {
+      const data: Saved = { msgs, model, useKb, system, temp, input };
+      data.msgs = msgs.slice(-MAX_KEEP);
+      localStorage.setItem(SAVE_KEY, JSON.stringify(data));
+    } catch {
+      /* เก็บไม่ได้ก็ไม่เป็นไร แค่ไม่จำข้ามหน้า */
+    }
+  }, [msgs, model, useKb, system, temp, input]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" }); // ต้องไม่ return ค่า ไม่งั้น React เรียกเป็นฟังก์ชันล้างแล้วพัง (destroy is not a function)
@@ -113,7 +155,7 @@ export default function Playground() {
           <SlidersHorizontal size={13} /> ตัวเลือก
         </button>
         {msgs.length > 0 && (
-          <button onClick={() => !busy && setMsgs([])} className="ml-auto text-xs text-base-400 hover:text-bad flex items-center gap-1.5">
+          <button onClick={() => { if (!busy) { setMsgs([]); try { localStorage.removeItem(SAVE_KEY); sessionStorage.removeItem(SAVE_KEY); } catch { /* ข้าม */ } } }} className="ml-auto text-xs text-base-400 hover:text-bad flex items-center gap-1.5">
             <Trash2 size={13} /> ล้างบทสนทนา
           </button>
         )}

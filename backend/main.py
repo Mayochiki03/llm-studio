@@ -28,6 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
 
 import ai_provider
+import ai_digest
 import api_studio
 import api_v1
 import auth
@@ -46,7 +47,7 @@ from jobs import PROJECT_ROOT, _subprocess_env, manager, pump_process
 load_dotenv(Path(__file__).parent / ".env")  # ไม่บังคับ: GEMINI_API_KEY=... เก็บไว้ที่นี่
 
 HF_API = "https://huggingface.co/api"
-APP_VERSION = "0.6.8"
+APP_VERSION = "0.7.3"
 
 
 async def _auto_backup_loop():
@@ -265,6 +266,43 @@ async def ai_generate_dataset(req: GenerateDatasetRequest):
         return {"ok": True, "pairs": pairs}
     except ai_provider.AIProviderError as e:
         return {"ok": False, "error": str(e)}
+
+
+# ---------- ให้ AI ช่วยอ่านผลเทรน (ส่งเฉพาะตัวเลข ไม่ส่งข้อมูลจริง) ----------
+
+@app.get("/api/jobs/{job_id}/ai-digest")
+def job_ai_digest(job_id: str):
+    """ดูข้อมูลที่ "จะถูกส่ง" ไป Gemini ก่อนตัดสินใจ (ยังไม่ส่งอะไร)"""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "ไม่พบงานนี้")
+    digest = ai_digest.build_digest(job)
+    return {"digest": digest, "prompt": ai_digest.build_prompt(digest), "configured": ai_provider.is_configured()}
+
+
+class AiSummaryRequest(BaseModel):
+    confirm: bool = False
+
+
+@app.post("/api/jobs/{job_id}/ai-summary")
+async def job_ai_summary(job_id: str, req: AiSummaryRequest):
+    """ส่งสรุปตัวเลขให้ Gemini อ่านผล: ต้องกดยืนยัน (confirm=true) เท่านั้น และบันทึกลงประวัติการใช้งาน"""
+    job = manager.get(job_id)
+    if not job:
+        raise HTTPException(404, "ไม่พบงานนี้")
+    if not req.confirm:
+        raise HTTPException(400, "ต้องยืนยันก่อนส่ง")
+    if job.status == "training":
+        raise HTTPException(409, "รอให้เทรนเสร็จก่อน (ระหว่างเทรนไม่ทำอะไรเพิ่มเพื่อไม่รบกวนเครื่อง)")
+    if not job.loss_points:
+        raise HTTPException(400, "ยังไม่มีข้อมูล loss ให้อ่าน")
+    digest = ai_digest.build_digest(job)
+    try:
+        text = await ai_provider.generate_text(ai_digest.build_prompt(digest))
+    except ai_provider.AIProviderError as e:
+        return {"ok": False, "error": str(e)}
+    db.audit("ai.job_summary", job_id, f"ส่งตัวเลข loss {len(digest['loss_points'])} จุดให้ Gemini (ไม่มีเนื้อหาข้อมูล)", "admin")
+    return {"ok": True, "text": text}
 
 
 # ---------- งานเทรน ----------

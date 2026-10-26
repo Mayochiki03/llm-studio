@@ -148,6 +148,16 @@ export interface Gpu {
   util_pct?: number;
 }
 
+export interface GpuLive {
+  gpu: Gpu | null;
+  ts: number;
+  cpu_pct: number | null;
+  ram_used_gb: number | null;
+  ram_total_gb: number | null;
+  net_rx: number | null;
+  net_tx: number | null;
+}
+
 export interface Hardware {
   gpus: Gpu[];
   gpu: Gpu | null;

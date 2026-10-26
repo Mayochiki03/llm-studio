@@ -85,3 +85,29 @@ def test_old_table_format_still_works():
 
 def test_script_has_loss_callback():
     assert "LLM_STUDIO_LOSS" in jobs._TRAIN_TEMPLATE and "add_callback" in jobs._TRAIN_TEMPLATE
+
+
+def test_explain_failure_known_causes():
+    assert "VRAM" in jobs.explain_failure(["x", "RuntimeError: Unsloth: No or negligible GPU memory available for fused cross entropy."])
+    assert "VRAM" in jobs.explain_failure(["torch.OutOfMemoryError: CUDA out of memory. Tried to allocate"])
+    assert "เน็ต" in jobs.explain_failure(["httpx.ConnectError: [Errno 11001] getaddrinfo failed"])
+    assert "คอมไพล์" in jobs.explain_failure(["RuntimeError: Failed to find C compiler. Please specify via CC"])
+    assert "การ์ดจอ" in jobs.explain_failure(["NotImplementedError: Unsloth cannot find any torch accelerator? You need a GPU."])
+    assert jobs.explain_failure(["something unknown"]) == ""
+
+
+def test_script_frees_vram_after_eval_and_save():
+    t = jobs._TRAIN_TEMPLATE
+    assert "on_evaluate" in t and "on_save" in t and "empty_cache" in t
+
+
+def test_marker_found_in_middle_of_progress_bar_line():
+    # log จริง: แถบ tqdm ไม่ขึ้นบรรทัดใหม่ บรรทัด loss เลยไปติดท้ายแถบ (train loss ของ step นั้นถูกบันทึกก่อน แล้ว validation ตามมา)
+    j = _job()
+    j.push_log('LLM_STUDIO_LOSS {"step": 40, "loss": 0.95, "val_loss": null}')
+    j.push_log('100%|██████████| 13/13 [00:03<00:00,  3.27it/s]LLM_STUDIO_LOSS {"step": 40, "loss": null, "val_loss": 0.998}')
+    assert j.loss_points == [{"step": 40, "loss": 0.95, "val_loss": 0.998}]
+
+
+def test_ansi_codes_are_stripped():
+    assert jobs._ANSI.sub("", "\x1b[A\x1b[2KUnsloth: ok\x1b") == "Unsloth: ok"

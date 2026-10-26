@@ -12,4 +12,5 @@ window.confirm = () => true;
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  sessionStorage.clear();
 });
