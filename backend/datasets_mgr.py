@@ -113,7 +113,11 @@ def normalize_example(ex: dict) -> dict | None:
     out = str(ex.get("output", "")).strip()
     if not ins or not out:
         return None
-    return {"instruction": ins, "input": str(ex.get("input", "") or "").strip(), "output": out}
+    res = {"instruction": ins, "input": str(ex.get("input", "") or "").strip(), "output": out}
+    g = ex.get("group")
+    if g:  # กลุ่มของตัวอย่างที่เป็นคำถามเดียวกันคนละสำนวน ใช้ตอนแบ่งชุดตรวจให้ไม่ข้ามฝั่ง (ไม่มีก็ไม่ใส่)
+        res["group"] = str(g)
+    return res
 
 
 def _version_path(dataset_id: str, version: int) -> Path:
@@ -190,6 +194,67 @@ def preview(dataset_id: str, version: int | None = None, limit: int = 20) -> dic
     return {"total": len(rows), "examples": rows[:limit]}
 
 
+def _grams(t: str) -> set[str]:
+    t = "".join(t.split()).lower()
+    return {t[i:i + 3] for i in range(max(1, len(t) - 2))}
+
+
+def quality_report(examples: list[dict], max_pairs: int = 12, scan_limit: int = 1500) -> dict:
+    """วัดความหลากหลายของชุดข้อมูล (0.8.1): คำถาม/คำตอบไม่ซ้ำกี่แบบ, คำตอบที่ซ้ำมากสุดกินกี่ %, และคู่คำถามที่คล้ายกันมาก
+    คู่ที่อยู่ "กลุ่มเดียวกัน" (สำนวนเสริมของคำถามเดิม) ไม่นับ เพราะตั้งใจให้คล้าย
+    ชุดใหญ่เกิน scan_limit แถวจะตรวจคู่คล้ายเฉพาะส่วนแรก (ตัวเลขอื่นนับครบทุกแถว)"""
+    rows = [e for e in (normalize_example(x) | {"group": x.get("group")} if normalize_example(x) else None for x in examples) if e]
+    n = len(rows)
+    if not n:
+        return {"total": 0, "unique_questions": 0, "unique_answers": 0, "answer_diversity": 0.0,
+                "top_answer_share": 0.0, "top_answers": [], "near_dup_pairs": 0, "near_dup_sample": [], "warnings": []}
+    from collections import Counter
+    oc = Counter(r["output"] for r in rows)
+    top = oc.most_common(5)
+    uq = len({r["instruction"] for r in rows})
+    near, sample = 0, []
+    sub = rows[:scan_limit]
+    gs = [_grams(r["instruction"]) for r in sub]
+    for i in range(len(sub)):
+        for j in range(i + 1, len(sub)):
+            if sub[i].get("group") and sub[i].get("group") == sub[j].get("group"):
+                continue
+            a, b = gs[i], gs[j]
+            if abs(len(a) - len(b)) > 0.3 * max(len(a), len(b)):
+                continue
+            if len(a & b) / len(a | b) >= 0.8 and sub[i]["instruction"] != sub[j]["instruction"]:
+                near += 1
+                if len(sample) < max_pairs:
+                    sample.append([sub[i]["instruction"], sub[j]["instruction"]])
+    warnings = []
+    if len(oc) / n < 0.12:
+        warnings.append("คำตอบซ้ำกันมาก (คำตอบไม่ซ้ำน้อยกว่า 12% ของแถว) โมเดลมีโอกาสท่องประโยคแทนการเข้าใจ ลองเพิ่มคำตอบสำนวนอื่น")
+    if top and top[0][1] / n > 0.15:
+        warnings.append(f"คำตอบเดียวกันกิน {round(top[0][1] / n * 100)}% ของข้อมูล (มากกว่า 15%) อาจทำให้โมเดลตอบแบบนี้พร่ำเพรื่อ")
+    return {"total": n, "unique_questions": uq, "unique_answers": len(oc), "answer_diversity": round(len(oc) / n, 3),
+            "top_answer_share": round(top[0][1] / n, 3) if top else 0.0,
+            "top_answers": [{"output": o[:80], "count": c} for o, c in top],
+            "near_dup_pairs": near, "near_dup_sample": sample, "warnings": warnings}
+
+
+def all_examples(dataset_id: str) -> dict:
+    """ตัวอย่างทั้งหมดของเวอร์ชันปัจจุบัน (ให้หน้าตารางแก้ไขโหลดไปแก้ทีเดียว)"""
+    rows = read_jsonl(config.CUSTOM_DATASETS_DIR / f"{dataset_id}.jsonl")
+    return {"total": len(rows), "version": _latest_version(dataset_id), "examples": rows}
+
+
+def replace_examples(dataset_id: str, examples: list[dict], note: str = "") -> dict:
+    """บันทึกผลจากตารางแก้ไข: แทนที่ทั้งชุดเป็นเวอร์ชันใหม่ (ของเดิมย้อนกลับได้จากประวัติเวอร์ชัน)
+    แถวที่ว่างครบทั้งสองช่องถูกทิ้ง; แถวที่เติมไม่ครบ (มีแต่คำถามหรือคำตอบ) ถือเป็น error เพื่อไม่ให้หายเงียบๆ"""
+    for i, x in enumerate(examples, 1):
+        a, b = str(x.get("instruction", "")).strip(), str(x.get("output", "")).strip()
+        if bool(a) != bool(b):
+            raise ValueError(f"แถวที่ {i} กรอกไม่ครบ (ต้องมีทั้งคำถามและคำตอบ หรือเว้นว่างทั้งคู่เพื่อลบแถว)")
+    res = save_version(dataset_id, examples, note=note or "แก้ไขจากตาราง", source="editor")
+    store.update_custom_size(dataset_id, res["count"])
+    return res
+
+
 def scan_dataset(dataset_id: str) -> dict:
     return scan_examples(read_jsonl(config.CUSTOM_DATASETS_DIR / f"{dataset_id}.jsonl"))
 
@@ -207,10 +272,13 @@ def from_kb(label: str, notes: str = "") -> dict:
 
 
 def from_facts(label: str, notes: str, facts: list[dict], augment: bool = True,
-               include_defaults: bool = True, add_eval: bool = True) -> dict:
+               include_defaults: bool = True, add_eval: bool = True,
+               out_of_scope: list[str] | None = None, unknown_answer: str | None = None,
+               rag_format: bool = False) -> dict:
     """สร้างชุดข้อมูลเทรน (และโจทย์ทดสอบที่ใช้คำสำคัญเดียวกัน) จากตารางข้อเท็จจริง (ดู faqbuilder.py)"""
     import faqbuilder
-    r = faqbuilder.build(facts, augment=augment, include_defaults=include_defaults)
+    r = faqbuilder.build(facts, augment=augment, include_defaults=include_defaults,
+                         out_of_scope=out_of_scope, unknown_answer=unknown_answer, rag_format=rag_format)
     if not r["train"]:
         raise ValueError("ไม่มีตัวอย่างให้สร้าง: แต่ละแถวต้องมีคำตอบและคำถามอย่างน้อย 1 ข้อ")
     res = create_dataset(label, notes or "สร้างจากตารางข้อเท็จจริง", r["train"], source="facts")

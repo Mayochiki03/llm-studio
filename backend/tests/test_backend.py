@@ -227,20 +227,20 @@ def test_create_job_gates_and_queue(client, fake_exec):
     ex = [{"instruction": "บัตร 1101700230678", "input": "", "output": "x"}]
     client.post("/api/catalog/custom-datasets", json={"label": "pii", "examples": ex})
     ds = [d for d in client.get("/api/catalog/datasets").json() if d["kind"] == "custom"][-1]["id"]
-    r = client.post("/api/jobs", json={**base, "dataset": ds, "force": True})
+    r = client.post("/api/jobs", json={**base, "output_name": "t-pii1", "dataset": ds, "force": True})
     assert r.status_code == 409 and r.json()["detail"]["code"] == "pii"
     assert "1101700230678" not in r.text
-    ok = client.post("/api/jobs", json={**base, "dataset": ds, "force": True, "pii_ack": True})
+    ok = client.post("/api/jobs", json={**base, "output_name": "t-pii2", "dataset": ds, "force": True, "pii_ack": True})
     assert ok.status_code == 200 and ok.json()["dataset_version"] == 1
     # ตั้งเวลา: อนาคตต้องเป็น scheduled และยกเลิกได้
-    fut = client.post("/api/jobs", json={**base, "force": True, "start_at": time.time() + 3600}).json()
+    fut = client.post("/api/jobs", json={**base, "output_name": "t-fut", "force": True, "start_at": time.time() + 3600}).json()
     assert fut["status"] == "scheduled"
     q = client.get("/api/queue").json()
     assert any(w["id"] == fut["id"] for w in q["waiting"])
     client.post(f"/api/jobs/{fut['id']}/stop")
     assert client.get(f"/api/jobs/{fut['id']}").json()["status"] == "stopped"
     # template_mode ผิด
-    assert client.post("/api/jobs", json={**base, "force": True, "template_mode": "x"}).status_code == 400
+    assert client.post("/api/jobs", json={**base, "output_name": "t-tm", "force": True, "template_mode": "x"}).status_code == 400
 
 
 def test_system_endpoints(client):

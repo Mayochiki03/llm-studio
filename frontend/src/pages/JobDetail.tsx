@@ -137,7 +137,7 @@ export default function JobDetail() {
       });
       setActionMsg(
         r.ok
-          ? `สร้างโมเดล "${job.output_name}" เข้า Ollama แล้ว และลงทะเบียนเป็น "รอตรวจ" ในทะเบียนโมเดล — ไปทดสอบที่ Playground หรือหน้าทดสอบได้เลย`
+          ? `สร้างโมเดล "${job.output_name}" เข้า Ollama แล้ว และเพิ่มเข้ารายการโมเดลเป็น "รอตรวจ" แล้ว — ไปลองคุยหรือทดสอบได้เลย`
           : `สร้างไม่สำเร็จ: ${r.stderr || "ดู log"}`
       );
     } finally {

@@ -95,7 +95,7 @@ describe("ตั้งค่า", () => {
 
   it("สร้างคีย์ API แล้วแสดงคีย์เต็มให้เห็นครั้งเดียว", async () => {
     installFetch({ "POST /api/apikeys": { id: "k1", name: "ระบบทดสอบ", key: "sk-llmstudio-abc123" } });
-    await open("/settings");
+    await open("/connect");
     fireEvent.change(await screen.findByPlaceholderText(/ชื่อคีย์/), { target: { value: "ระบบทดสอบ" } });
     fireEvent.click(screen.getByText("สร้าง"));
     expect(await screen.findByText("sk-llmstudio-abc123")).toBeTruthy();

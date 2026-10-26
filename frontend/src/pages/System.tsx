@@ -125,7 +125,7 @@ export default function System() {
 
         {/* ---------- สำรอง ---------- */}
         <Card>
-          <CardHeader title="สำรองและกู้คืน" subtitle="สำรองคลังความรู้ ทะเบียนโมเดล ชุดข้อมูล และตั้งค่า (ไม่รวมไฟล์โมเดลขนาดใหญ่)"
+          <CardHeader title="สำรองและกู้คืน" subtitle="สำรองคลังความรู้ รายการโมเดล ชุดข้อมูล และตั้งค่า (ไม่รวมไฟล์โมเดลขนาดใหญ่)"
             action={
               <div className="flex gap-2">
                 <Button variant="secondary" className="text-xs py-1.5" onClick={() => upRef.current?.click()}><Upload size={13} /> กู้จากไฟล์</Button>

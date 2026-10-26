@@ -6,7 +6,6 @@ import Button from "../components/Button";
 import { Field, NumberInput, Notice, Spinner, TextArea, TextInput, Toggle } from "../components/ui";
 import { toast, errText } from "../components/toast";
 import { api, setToken } from "../api/client";
-import ApiKeysCard from "../components/ApiKeysCard";
 import type { Settings as S } from "../types";
 
 export default function Settings() {
@@ -154,8 +153,6 @@ export default function Settings() {
             <Notice tone="info">ลืมรหัสผ่าน: ลบส่วน <code>auth</code> ในไฟล์ <code>studio_data/settings.json</code> แล้วรีสตาร์ท backend</Notice>
           </div>
         </Card>
-
-        <ApiKeysCard />
 
         <Card>
           <CardHeader title="ตำแหน่งโปรเจกต์" subtitle="ที่เก็บโมเดล, dataset cache และสคริปต์ที่สร้างขึ้นระหว่างเทรน" />

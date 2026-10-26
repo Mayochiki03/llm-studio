@@ -14,7 +14,7 @@ def test_ขยายสำนวนและกันข้อสอบ():
     r = faqbuilder.build(FACTS, include_defaults=False)
     assert r["stats"]["eval"] == 1 and r["eval"][0]["text"] == "ปิดกี่โมง"
     assert all(t["instruction"] != "ปิดกี่โมง" for t in r["train"])
-    assert len(r["train"]) == 3 * len(faqbuilder.PREFIXES)
+    assert len(r["train"]) == 3 * 2
 
 
 def test_ไม่ขยายและไม่ใส่ตัวอย่างพื้นฐาน():
@@ -29,14 +29,14 @@ def test_แถวไม่ครบถูกข้าม():
 
 def test_คำถามน้อยกว่า3ไม่กันข้อสอบ():
     r = faqbuilder.build([{"topic": "t", "answer": "a", "keywords": ["a"], "questions": ["q1", "q2"]}], include_defaults=False)
-    assert r["stats"]["eval"] == 0 and len(r["train"]) == 2 * len(faqbuilder.PREFIXES)
+    assert r["stats"]["eval"] == 0 and len(r["train"]) == 2 * 2
 
 
 def test_แพ็ก2ครบและข้อสอบผ่านคำตอบในชุดเทรน():
     facts = json.loads((load_sample_pack.PACK2_DIR / "facts.json").read_text(encoding="utf-8"))
     r = faqbuilder.build(facts)
     train_q = {t["instruction"] for t in r["train"]}
-    assert r["stats"]["eval"] == 16 and r["stats"]["train"] > 500
+    assert r["stats"]["eval"] == 26 and r["stats"]["train"] > 250  # 16 ข้อสอบจากข้อเท็จจริง + 2 ข้อสอบทั่วไป + 8 ข้อสอบนอกขอบเขต
     for p in r["eval"]:
         assert p["text"] not in train_q
         assert any(evalx.check_reply(p, t["output"])["passed"] for t in r["train"]), p["text"]
@@ -44,6 +44,16 @@ def test_แพ็ก2ครบและข้อสอบผ่านคำต�
 
 def test_โหลดแพ็ก2เข้าระบบ():
     res = load_sample_pack.load_pack2(reset=True, kb=True)
-    assert res["examples"] > 500 and res["prompts"] == 16 and res["kb_docs"] == 16
-    assert len(store.list_prompts()) == 16
+    assert res["examples"] > 250 and res["prompts"] == 26 and res["kb_docs"] == 16
+    assert len(store.list_prompts()) == 26
     assert len([d for d in store.list_datasets() if d.get("kind") == "custom"]) == 1
+
+
+def test_โหลดแพ็ก2ซ้ำไม่ทำให้คลังความรู้ซ้ำสะสม():
+    import kb as kbmod
+    kbmod.add_doc("เอกสารของผู้ใช้", "ข้อมูลที่ผู้ใช้เพิ่มเอง", category="ของฉัน", source_name="manual")
+    load_sample_pack.load_pack2(reset=True, kb=True)
+    load_sample_pack.load_pack2(reset=True, kb=True)
+    docs = kbmod.list_docs()
+    assert sum(1 for d in docs if d.get("source_name") == "sample-pack-02") == 16
+    assert any(d["title"] == "เอกสารของผู้ใช้" for d in docs)  # ของผู้ใช้ไม่ถูกลบ

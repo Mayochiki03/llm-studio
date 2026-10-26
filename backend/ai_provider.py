@@ -31,16 +31,19 @@ import httpx
 _TRANSIENT_STATUS = {503, 429}
 _RETRY_DELAYS = [2, 5, 10]  # seconds, one retry per entry
 
-# Tried in order; first one that doesn't 404 wins and is reused after that.
-# Put the current recommended model first.
+# ลองตามลำดับ: รุ่น lite ก่อน (เร็วและพอสำหรับงานสรุป/สร้าง Q&A) แล้วค่อยรุ่นใหญ่
+# ตัวแรกที่ใช้ได้จะถูกจำไว้ใช้ต่อ (0.8.0: เปลี่ยนจาก gemini-3.8-flash ที่ timeout เป็น lite)
 _CANDIDATE_MODELS = [
     os.environ.get("GEMINI_MODEL", "").strip() or None,
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3.8-flash",
     "gemini-2.5-flash",
-    "gemini-2.0-flash",
 ]
-_CANDIDATE_MODELS = [m for m in _CANDIDATE_MODELS if m]
+_CANDIDATE_MODELS = [m for m in dict.fromkeys(_CANDIDATE_MODELS) if m]
 _working_model: str | None = None
+# timeout ต่อรุ่น (วินาที) — รุ่นที่ค้างจะถูกข้ามไปรุ่นถัดไปแทนที่จะรอ 60 วิ
+_MODEL_TIMEOUT = 25
 
 
 def _gemini_url(model: str) -> str:
@@ -86,17 +89,24 @@ def _extract_json_array(text: str) -> list[dict]:
 
 
 class _ModelRetired(Exception):
-    """Raised internally when a model id 404s, so the caller moves to the next candidate."""
+    """รุ่นนี้ใช้ไม่ได้ (404 / timeout / ล้มเหลวซ้ำ) → ให้ผู้เรียกลองรุ่นถัดไป"""
+
+    def __init__(self, reason: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _describe(e: Exception) -> str:
+    """ข้อความ error ที่อ่านออก (httpx บางตัว เช่น ReadTimeout มี str ว่าง)"""
+    return str(e).strip() or type(e).__name__
 
 
 async def _call_model(client: httpx.AsyncClient, model: str, api_key: str, prompt: str) -> dict:
-    """POST to one Gemini model, retrying transient errors (503/429) a few times.
+    """เรียก Gemini 1 รุ่น (retry 503/429 สั้นๆ)
 
-    Raises _ModelRetired on 404 (caller should try the next candidate model),
-    or AIProviderError for anything else that still fails after retries.
+    404 / timeout / error ที่ไม่ใช่ปัญหาชั่วคราว → _ModelRetired (ไปลองรุ่นถัดไป)
     """
     delays = [0] + _RETRY_DELAYS
-    last_error: AIProviderError | None = None
     for i, delay in enumerate(delays):
         if delay:
             await asyncio.sleep(delay)
@@ -108,29 +118,62 @@ async def _call_model(client: httpx.AsyncClient, model: str, api_key: str, promp
                     "contents": [{"parts": [{"text": prompt}]}],
                     "generationConfig": {"temperature": 0.4},
                 },
+                timeout=_MODEL_TIMEOUT,
             )
             r.raise_for_status()
             return r.json()
         except httpx.HTTPStatusError as e:
             status = e.response.status_code
             if status == 404:
-                raise _ModelRetired()
-            last_error = AIProviderError(f"Gemini API ตอบกลับ error: {status} — {e.response.text[:200]}")
+                raise _ModelRetired("404 (รุ่นนี้ถูกยกเลิกหรือบัญชีนี้ใช้ไม่ได้)")
             if status in _TRANSIENT_STATUS and i < len(delays) - 1:
-                continue  # retry this same model after the next delay
+                continue
             if status in _TRANSIENT_STATUS:
+                raise _ModelRetired(f"{status} (กำลังมีคนใช้งานเยอะ)")
+            if status in (400, 401, 403):
+                # คีย์ผิด/ไม่มีสิทธิ์ — เปลี่ยนรุ่นก็ไม่ช่วย แจ้งตรงๆ
                 raise AIProviderError(
-                    "Gemini กำลังมีคนใช้งานเยอะตอนนี้ (error 503) ลองใหม่อีกครั้งในอีกสักครู่ "
-                    "— ข้อมูลที่พิมพ์/วางไว้ในกล่องยังอยู่ครบ ไม่ต้องพิมพ์ใหม่"
+                    f"Gemini ปฏิเสธคำขอ ({status}) — ตรวจ GEMINI_API_KEY ว่าถูกต้องและยังใช้งานได้: "
+                    f"{e.response.text[:160]}"
                 )
-            raise last_error
+            raise _ModelRetired(f"error {status}")
         except httpx.HTTPError as e:
-            raise AIProviderError(f"เรียก Gemini API ไม่สำเร็จ: {e}")
-    raise last_error or AIProviderError("เรียก Gemini API ไม่สำเร็จ")
+            # timeout / เชื่อมต่อไม่ได้ → ข้ามไปรุ่นถัดไป
+            raise _ModelRetired(_describe(e))
+    raise _ModelRetired("ไม่สำเร็จ")
+
+
+async def list_models() -> list[str]:
+    """ถาม Gemini ว่าบัญชีนี้ใช้รุ่นไหนสร้างข้อความได้บ้าง (ใช้ตรวจเมื่อ id เปลี่ยน)"""
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise AIProviderError("ยังไม่ได้ตั้งค่า GEMINI_API_KEY")
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            r = await client.get(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                params={"key": api_key, "pageSize": 200},
+            )
+            r.raise_for_status()
+    except httpx.HTTPError as e:
+        raise AIProviderError(f"ดึงรายการรุ่น Gemini ไม่สำเร็จ: {_describe(e)}")
+    out = []
+    for m in r.json().get("models", []):
+        if "generateContent" in m.get("supportedGenerationMethods", []):
+            out.append(m.get("name", "").removeprefix("models/"))
+    return out
+
+
+def _lite_first(models: list[str]) -> list[str]:
+    """เรียงรุ่นจาก ListModels: lite/flash ก่อน ตัดรุ่น image/tts/embedding ที่ไม่ใช่งานข้อความ"""
+    bad = ("image", "tts", "embed", "live", "audio", "vision", "imagen", "veo", "robotics")
+    ok = [m for m in models if m.startswith("gemini") and not any(b in m for b in bad)]
+    ok.sort(key=lambda m: (0 if "lite" in m else 1 if "flash" in m else 2, m))
+    return ok
 
 
 async def _generate(prompt: str) -> str:
-    """ส่ง prompt ให้ Gemini (ลองรุ่นตามลำดับ จำรุ่นที่ใช้ได้) แล้วคืนข้อความตอบกลับดิบ"""
+    """ส่ง prompt ให้ Gemini (ลองรุ่นตามลำดับ ข้ามรุ่นที่ timeout/404 จำรุ่นที่ใช้ได้) แล้วคืนข้อความดิบ"""
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise AIProviderError(
@@ -139,24 +182,35 @@ async def _generate(prompt: str) -> str:
 
     global _working_model
     models_to_try = [_working_model] if _working_model else list(_CANDIDATE_MODELS)
-
+    failures: list[str] = []
     data: dict | None = None
-    async with httpx.AsyncClient(timeout=60) as client:
-        for idx, model in enumerate(models_to_try):
+    tried_discovery = False
+
+    async with httpx.AsyncClient(timeout=_MODEL_TIMEOUT) as client:
+        while models_to_try and data is None:
+            model = models_to_try.pop(0)
             try:
                 data = await _call_model(client, model, api_key, prompt)
                 _working_model = model
-                break
-            except _ModelRetired:
-                _working_model = None
-                if idx == len(models_to_try) - 1:
-                    raise AIProviderError(
-                        f"โมเดล Gemini ที่รู้จักทั้งหมดใช้ไม่ได้แล้ว (รุ่นล่าสุดที่ลอง: {model}) "
-                        "ลองตั้งค่า GEMINI_MODEL=ชื่อรุ่นใหม่ ใน backend/.env"
-                    )
-                continue  # try the next candidate model
+            except _ModelRetired as e:
+                failures.append(f"{model}: {e.reason}")
+                if model == _working_model:
+                    _working_model = None
+                    models_to_try = [m for m in _CANDIDATE_MODELS if m != model]
+                # หมดรายการแล้ว → ถาม ListModels หาตัวเลือกใหม่ 1 ครั้ง
+                if not models_to_try and not tried_discovery:
+                    tried_discovery = True
+                    try:
+                        known = set(_CANDIDATE_MODELS)
+                        models_to_try = [m for m in _lite_first(await list_models()) if m not in known][:4]
+                    except AIProviderError:
+                        pass
 
-    assert data is not None
+    if data is None:
+        raise AIProviderError(
+            "เรียก Gemini ไม่สำเร็จทุกรุ่นที่ลอง — " + "; ".join(failures[-5:]) +
+            " | ลองตั้ง GEMINI_MODEL=gemini-3.5-flash-lite ใน backend/.env แล้ว restart backend"
+        )
     try:
         return data["candidates"][0]["content"]["parts"][0]["text"]
     except (KeyError, IndexError):

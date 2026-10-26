@@ -64,6 +64,11 @@ def load_pack2(reset: bool = False, kb: bool = False, pack_dir: Path = PACK2_DIR
     kb_docs = 0
     if kb:
         import kb as kbmod
+        # ลบเอกสารตัวอย่างที่เคยโหลดไว้ก่อน (รู้จากชื่อแหล่งที่มา sample-pack-02) กันเอกสารซ้ำสะสมทุกครั้งที่รันซ้ำ
+        # เอกสารที่ผู้ใช้เพิ่มเองไม่ถูกแตะ และที่ลบยังย้อนกลับได้จากประวัติของคลังความรู้
+        for d in kbmod.list_docs():
+            if d.get("source_name") == "sample-pack-02":
+                kbmod.delete_doc(d["id"])
         for f in facts:
             if f.get("answer") and f.get("topic"):
                 kbmod.add_doc(f["topic"], f"หัวข้อ: {f['topic']}\nคำตอบ: {f['answer']}", kind="text",

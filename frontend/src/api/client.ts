@@ -114,6 +114,16 @@ export async function downloadFile(path: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
+export interface ScopeRule { id: string; name: string; kind: "red_flag" | "blocked"; enabled: boolean; keywords: string[]; reply: string }
+export interface ScopeConfig { enabled: boolean; require_context: boolean; no_info_reply: string; smalltalk_keywords: string[]; rules: ScopeRule[] }
+export interface ScopeState { scope: ScopeConfig; default: ScopeConfig; kb_min_score: number; kb_top_k: number; default_system_prompt: string }
+export interface ScopeTestResult { decision: { kind: string; rule_name: string; reply: string } | null; hits: { title: string; score: number }[]; smalltalk?: boolean }
+
+export interface DsQuality {
+  total: number; unique_questions: number; unique_answers: number; answer_diversity: number; top_answer_share: number;
+  top_answers: { output: string; count: number }[]; near_dup_pairs: number; near_dup_sample: string[][]; warnings: string[];
+}
+
 export const api = {
   health: () => req<{ ok: boolean; project_root: string; version?: string; auth?: boolean; ollama?: boolean }>("/health"),
 
@@ -222,8 +232,8 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   addEvalPrompt: (text: string, category: string) =>
     req<EvalPrompt[]>("/eval/prompts", { method: "POST", body: JSON.stringify({ text, category }) }),
   deleteEvalPrompt: (id: string) => req<EvalPrompt[]>(`/eval/prompts/${id}`, { method: "DELETE" }),
-  runEval: (model: string, prompt_ids: string[]) =>
-    req<EvalRun>("/eval/run", { method: "POST", body: JSON.stringify({ model, prompt_ids }) }),
+  runEval: (model: string, prompt_ids: string[], use_kb = false) =>
+    req<EvalRun>("/eval/run", { method: "POST", body: JSON.stringify({ model, prompt_ids, use_kb }) }),
   evalRuns: () => req<EvalRun[]>("/eval/runs"),
   rateResult: (runId: string, resultId: string, rating: number) =>
     req<EvalRun>(`/eval/runs/${runId}/results/${resultId}/rate`, {
@@ -233,8 +243,8 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   leaderboard: () => req<LeaderboardRow[]>("/eval/leaderboard"),
   updateEvalPrompt: (id: string, patch: Partial<Pick<EvalPrompt, "text" | "category" | "expect" | "must_not" | "red_flag" | "pinned">>) =>
     put<EvalPrompt[]>(`/eval/prompts/${id}`, patch),
-  compare: (models: string[], pinned_only: boolean, prompt_ids: string[] = []) =>
-    post<CompareResult>("/eval/compare", { models, pinned_only, prompt_ids }),
+  compare: (models: string[], pinned_only: boolean, prompt_ids: string[] = [], use_kb = false) =>
+    post<CompareResult>("/eval/compare", { models, pinned_only, prompt_ids, use_kb }),
 
   // ---- ใหม่ใน 0.5 ----
   authStatus: () => req<{ enabled: boolean }>("/auth/status"),
@@ -243,6 +253,9 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   disableAuth: () => post<{ ok: boolean }>("/auth/disable"),
 
   settings: () => req<Settings>("/settings"),
+  scope: () => req<ScopeState>("/scope"),
+  saveScope: (b: { scope: ScopeConfig; kb_min_score: number; kb_top_k: number; default_system_prompt: string }) => put<ScopeState>("/scope", b),
+  scopeTest: (message: string, use_kb = true) => post<ScopeTestResult>("/scope/test", { message, use_kb }),
   saveSettings: (patch: Partial<Settings>) => put<Settings>("/settings", patch),
 
   dashboard: () => req<Dashboard>("/dashboard"),
@@ -290,7 +303,7 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
 
   /** แชทแบบสตรีม (NDJSON) เรียก onEvent ทีละบรรทัด; ยกเลิกได้ด้วย signal */
   playground: async (
-    body: { model: string; message: string; history: { role: string; content: string }[]; use_kb: boolean; system_prompt?: string; temperature?: number; top_k?: number },
+    body: { model: string; message: string; history: { role: string; content: string }[]; use_kb: boolean; system_prompt?: string; temperature?: number; top_k?: number; apply_scope?: boolean },
     onEvent: (ev: any) => void,
     signal?: AbortSignal
   ) => {
@@ -327,15 +340,21 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   dsScan: (examples: QAPair[]) => post<PiiScan>("/datasets/scan", { examples }),
   dsVersions: (id: string) => req<DatasetVersion[]>(`/datasets/${id}/versions`),
   dsPreview: (id: string, version = 0) => req<{ total: number; examples: QAPair[] }>(`/datasets/${id}/preview?version=${version}&limit=20`),
+  dsExamples: (id: string) => req<{ total: number; version: number; examples: (QAPair & { group?: string })[] }>(`/datasets/${id}/examples`),
+  dsReplace: (id: string, examples: unknown[], note = "") => put<any>(`/datasets/${id}/examples`, { examples, note }),
+  dsQuality: (id: string) => req<DsQuality>(`/datasets/${id}/quality`),
+  dsSuggest: (b: { kind: "questions" | "answers"; topic: string; answer: string; questions: string[]; n?: number }) =>
+    post<{ ok: boolean; items?: string[]; error?: string }>("/datasets/suggest", { ...b, confirm: true }),
   dsScanOne: (id: string) => req<PiiScan>(`/datasets/${id}/scan`),
   dsAppend: (id: string, examples: QAPair[], note = "") => post<any>(`/datasets/${id}/append`, { examples, note }),
   dsRestore: (id: string, version: number) => post<any>(`/datasets/${id}/restore`, { version }),
   dsFromKb: (label: string, notes = "") => post<any>("/datasets/from-kb", { label, notes }),
   dsFactsTemplate: () => req<{ topic: string; answer: string; questions: string[]; keywords: string[]; red_flag?: boolean }[]>("/datasets/facts-template"),
-  dsFactsPreview: (facts: unknown[], augment = true, include_defaults = true) =>
-    post<{ stats: { train: number; eval: number; skipped: number }; train_sample: { instruction: string }[] }>("/datasets/facts-preview", { label: "x", facts, augment, include_defaults }),
-  dsFromFacts: (label: string, facts: unknown[], augment = true, include_defaults = true) =>
-    post<{ dataset_id: string; examples: number; eval_added: number }>("/datasets/from-facts", { label, facts, augment, include_defaults, add_eval: true }),
+  dsOosDefault: () => req<{ questions: string[]; answer: string }>("/datasets/out-of-scope-default"),
+  dsFactsPreview: (facts: unknown[], augment = true, include_defaults = true, out_of_scope?: string[], unknown_answer?: string, rag_format = false) =>
+    post<{ stats: { train: number; eval: number; skipped: number; out_of_scope?: number; oos_eval?: number }; train_sample: { instruction: string }[] }>("/datasets/facts-preview", { label: "x", facts, augment, include_defaults, out_of_scope, unknown_answer, rag_format }),
+  dsFromFacts: (label: string, facts: unknown[], augment = true, include_defaults = true, out_of_scope?: string[], unknown_answer?: string, rag_format = false) =>
+    post<{ dataset_id: string; examples: number; eval_added: number }>("/datasets/from-facts", { label, facts, augment, include_defaults, add_eval: true, out_of_scope, unknown_answer, rag_format }),
 
   // ทะเบียนโมเดล
   registry: () => req<ModelVersion[]>("/registry"),

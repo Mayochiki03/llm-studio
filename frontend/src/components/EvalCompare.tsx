@@ -11,6 +11,7 @@ import type { CompareResult } from "../types";
 export default function EvalCompare({ models, selectedPromptIds }: { models: string[]; selectedPromptIds: Set<string> }) {
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [pinnedOnly, setPinnedOnly] = useState(true);
+  const [useKb, setUseKb] = useState(false); // ทดสอบแบบมีคลังความรู้ + ขอบเขต เหมือนใช้งานจริง
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<CompareResult | null>(null);
 
@@ -26,7 +27,7 @@ export default function EvalCompare({ models, selectedPromptIds }: { models: str
     setRes(null);
     try {
       // pinnedOnly = ใช้เฉพาะโจทย์ที่ตรึง/red flag; ปิด = ใช้โจทย์ที่ติ๊กเลือกไว้ด้านบน
-      setRes(await api.compare(Array.from(picked), pinnedOnly, pinnedOnly ? [] : Array.from(selectedPromptIds)));
+      setRes(await api.compare(Array.from(picked), pinnedOnly, pinnedOnly ? [] : Array.from(selectedPromptIds), useKb));
     } catch (e) {
       toast(errText(e), "bad");
     } finally {
@@ -50,6 +51,10 @@ export default function EvalCompare({ models, selectedPromptIds }: { models: str
         <label className="flex items-center gap-2 text-xs text-base-300 cursor-pointer">
           <input type="checkbox" className="accent-accent-500" checked={pinnedOnly} onChange={(e) => setPinnedOnly(e.target.checked)} />
           ใช้เฉพาะโจทย์ที่ตรึงไว้และเคส red flag (ปิด = ใช้โจทย์ที่ติ๊กเลือกด้านบน {selectedPromptIds.size} ข้อ)
+        </label>
+        <label className="flex items-center gap-2 text-xs text-base-300 cursor-pointer">
+          <input type="checkbox" className="accent-accent-500" checked={useKb} onChange={(e) => setUseKb(e.target.checked)} />
+          ทดสอบแบบมีคลังความรู้และขอบเขต (เหมือนใช้งานจริง) — วัดผลที่ผู้ใช้เห็นจริง ไม่ใช่แค่ความจำของโมเดล
         </label>
         <Button onClick={run} disabled={busy || picked.size < 2}>
           <GitCompare size={15} /> {busy ? "กำลังเปรียบเทียบ (อาจใช้เวลาหลายนาที)..." : `เปรียบเทียบ ${picked.size} โมเดล`}

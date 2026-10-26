@@ -46,7 +46,7 @@ export default function Models() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <Topbar title="โมเดลของฉัน" subtitle="โมเดลทั้งหมดที่โหลดอยู่ใน Ollama บนเครื่องนี้" />
+      <Topbar title="โมเดลในเครื่อง (Ollama)" subtitle="โมเดลทั้งหมดที่ติดตั้งอยู่ในเครื่องนี้" />
 
       <div className="p-4 md:p-8 max-w-4xl space-y-4">
         <div className="flex justify-end">

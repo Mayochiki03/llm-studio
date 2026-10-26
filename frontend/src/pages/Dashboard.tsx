@@ -50,7 +50,7 @@ export default function Dashboard() {
             <div className="text-[11px] text-base-500 mt-1">
               {d.active_model ? `เปิดใช้ ${timeAgo(d.active_model.activated_at)}` : `รอตรวจ ${d.registry_counts.candidate ?? 0} · อนุมัติแล้ว ${d.registry_counts.approved ?? 0}`}
             </div>
-            <Link to="/registry" className="text-xs text-accent-400 hover:underline mt-2 inline-block">ไปทะเบียนโมเดล</Link>
+            <Link to="/registry" className="text-xs text-accent-400 hover:underline mt-2 inline-block">ไปหน้าโมเดลที่ใช้งานจริง</Link>
           </Card>
 
           <Card className="p-5">

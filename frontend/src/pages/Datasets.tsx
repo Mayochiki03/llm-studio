@@ -6,6 +6,7 @@ import { Card } from "../components/Card";
 import Button from "../components/Button";
 import CustomDatasetDialog from "../components/CustomDatasetDialog";
 import FactsBuilderDialog from "../components/FactsBuilderDialog";
+import DatasetTableEditor from "../components/DatasetTableEditor";
 import { Empty, Field, Modal, Notice, Pill, Spinner, TextArea, TextInput, fmtDate } from "../components/ui";
 import { toast, errText } from "../components/toast";
 import { api } from "../api/client";
@@ -85,6 +86,7 @@ function DetailDialog({ ds, onClose }: { ds: DatasetOption; onClose: () => void 
   const [preview, setPreview] = useState<{ total: number; examples: QAPair[] } | null>(null);
   const [scan, setScan] = useState<PiiScan | null>(null);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(false);
   const [q, setQ] = useState("");
   const [a, setA] = useState("");
   const [busy, setBusy] = useState(false);
@@ -116,11 +118,15 @@ function DetailDialog({ ds, onClose }: { ds: DatasetOption; onClose: () => void 
 
   return (
     <Modal title={ds.label} onClose={onClose} wide>
+      {editing && <DatasetTableEditor id={ds.id} label={ds.label} onClose={() => setEditing(false)} onSaved={() => { setEditing(false); load(); }} />}
       {scan && <PiiSummary scan={scan} />}
 
       <div className="flex items-center justify-between">
         <div className="text-xs text-base-400">ตัวอย่างล่าสุด ({preview?.total ?? "-"} ทั้งหมด แสดง 20 แรก)</div>
-        <Button variant="secondary" className="text-xs py-1.5" onClick={() => setAdding((s) => !s)}><PlusCircle size={13} /> เพิ่มตัวอย่าง</Button>
+        <div className="flex gap-2">
+          {ds.id.startsWith("custom-") && <Button variant="secondary" className="text-xs py-1.5" onClick={() => setEditing(true)}><Table2 size={13} /> แก้ไขเป็นตาราง</Button>}
+          <Button variant="secondary" className="text-xs py-1.5" onClick={() => setAdding((s) => !s)}><PlusCircle size={13} /> เพิ่มตัวอย่าง</Button>
+        </div>
       </div>
       {adding && (
         <div className="border border-base-800 rounded-lg p-3 space-y-2">

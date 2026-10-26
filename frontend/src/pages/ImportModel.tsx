@@ -38,7 +38,7 @@ export default function ImportModel() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <Topbar title="นำเข้าโมเดล" subtitle="เอาโมเดลที่เทรนมาจากที่อื่น (เช่น Colab) เข้า Ollama โดยไม่ต้องเปิด cmd" />
+      <Topbar title="นำเข้าโมเดลจากที่อื่น" subtitle="เอาโมเดลที่เทรนมาจากที่อื่น (เช่น Colab) เข้า Ollama โดยไม่ต้องเปิด cmd" />
 
       <div className="p-4 md:p-8 max-w-2xl space-y-6">
         <Card>

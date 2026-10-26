@@ -15,6 +15,7 @@ from pydantic import BaseModel
 import apikeys
 import config
 import db
+import guard
 import kb
 import ollama_client
 import registry
@@ -89,12 +90,25 @@ async def ask(body: AskBody, key: dict = Depends(require_key)):
     if not act:
         raise HTTPException(503, "ยังไม่มีโมเดลที่ตั้งเป็นใช้งานจริง ให้ผู้ดูแลอนุมัติและเปิดใช้โมเดลในทะเบียนก่อน")
 
+    # ด่าน 1: กฎตอบตายตัว (เคสอันตราย/หัวข้อต้องห้าม) ไม่ผ่านโมเดล
+    rule = guard.check_rules(q)
+    if rule:
+        db.audit("api.ask.guard", key["name"], f"{rule['kind']}:{rule['rule_id']} q_len={len(q)}", actor=f"key:{key['name']}")
+        return {"answer": rule["reply"], "model": None, "mode": "guard", "elapsed_s": 0.0, "sources": [],
+                "guard": {"kind": rule["kind"], "rule": rule["rule_id"]}}
     system = config.get_settings()["default_system_prompt"]
     hits: list[dict] = []
     mode = "off"
     if body.use_kb:
         res = await kb.search(q, body.top_k, None, body.category)
         hits, mode = res.get("hits", []), res.get("mode", "none")
+    # ด่าน 2-3: ไม่มีเอกสารรองรับ → ตอบไม่มีข้อมูลทันที
+    miss = guard.check_context(q, hits, body.use_kb)
+    if miss:
+        db.audit("api.ask.guard", key["name"], f"no_context q_len={len(q)}", actor=f"key:{key['name']}")
+        return {"answer": miss["reply"], "model": None, "mode": mode, "elapsed_s": 0.0, "sources": [],
+                "guard": {"kind": "no_context", "rule": "no-context"}}
+    if body.use_kb:
         ctx = kb.build_context(hits)
         if ctx:
             system = f"{system}\n\n{ctx}".strip()

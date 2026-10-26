@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import tempfile
 import time
 from pathlib import Path
@@ -23,6 +24,7 @@ import config
 import datasets_mgr
 import db
 import evalx
+import guard
 import hardware
 import kb
 import kbtests
@@ -428,6 +430,7 @@ class PlayBody(BaseModel):
     top_k: int | None = None
     system_prompt: str | None = None
     temperature: float | None = None
+    apply_scope: bool = True   # ใช้ขอบเขตการตอบ (กฎตอบตายตัว/ต้องมีเอกสาร) เหมือนที่ระบบอื่นเจอผ่าน API
 
 
 @router.post("/playground/chat")
@@ -438,9 +441,22 @@ async def playground_chat(body: PlayBody):
     system = body.system_prompt if body.system_prompt is not None else s["default_system_prompt"]
     hits: list[dict] = []
     search_info: dict = {}
-    if body.use_kb:
+    # ด่านขอบเขต (guard.py): กฎตอบตายตัวมาก่อน ไม่เรียกโมเดล
+    decision = guard.check_rules(body.message) if body.apply_scope else None
+    if body.use_kb and not decision:
         search_info = await kb.search(body.message, body.top_k)
         hits = search_info.get("hits", [])
+        if body.apply_scope:
+            decision = guard.check_context(body.message, hits, True)
+    if decision:
+        async def fixed():
+            yield json.dumps({"type": "sources", "hits": hits, "mode": search_info.get("mode", "off"),
+                              "note": search_info.get("note", ""), "guard": {"kind": decision["kind"], "rule": decision["rule_name"]}},
+                             ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "delta", "text": decision["reply"]}, ensure_ascii=False) + "\n"
+            yield json.dumps({"type": "done", "guard": decision["kind"]}, ensure_ascii=False) + "\n"
+        return StreamingResponse(fixed(), media_type="application/x-ndjson")
+    if body.use_kb:
         ctx = kb.build_context(hits)
         if ctx:
             system = f"{system}\n\n{ctx}".strip()
@@ -463,6 +479,63 @@ async def playground_chat(body: PlayBody):
                 yield json.dumps({"type": "done", **{k: v for k, v in ev.items() if k != "done"}}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+# ====================================================================== ขอบเขตการตอบ
+class ScopeTestBody(BaseModel):
+    message: str
+    use_kb: bool = True
+
+
+@router.get("/scope")
+def scope_get():
+    """ขอบเขตการตอบปัจจุบัน + ค่าที่เกี่ยวข้องในคลังความรู้ (เกณฑ์คะแนน/จำนวนชิ้น) + system prompt"""
+    s = config.get_settings()
+    return {"scope": guard.get_scope(), "default": guard.DEFAULT_SCOPE, "kb_min_score": s["kb_min_score"],
+            "kb_top_k": s["kb_top_k"], "default_system_prompt": s["default_system_prompt"]}
+
+
+class ScopeBody(BaseModel):
+    scope: dict
+    kb_min_score: float | None = None
+    kb_top_k: int | None = None
+    default_system_prompt: str | None = None
+
+
+@router.put("/scope")
+def scope_put(body: ScopeBody):
+    try:
+        clean = guard.validate_scope(body.scope)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    patch: dict = {"scope": clean}
+    if body.kb_min_score is not None:
+        if not 0 <= body.kb_min_score <= 1:
+            raise HTTPException(400, "เกณฑ์คะแนนต้องอยู่ระหว่าง 0 ถึง 1")
+        patch["kb_min_score"] = body.kb_min_score
+    if body.kb_top_k is not None:
+        if not 1 <= body.kb_top_k <= 20:
+            raise HTTPException(400, "จำนวนชิ้นความรู้ต้องอยู่ระหว่าง 1 ถึง 20")
+        patch["kb_top_k"] = body.kb_top_k
+    if body.default_system_prompt is not None:
+        patch["default_system_prompt"] = body.default_system_prompt.strip()[:4000]
+    config.save_settings(patch)  # รายการ (กฎ/คำคุยทั่วไป) ถูกแทนที่ทั้งชุด ไม่ใช่รวม กฎที่ลบแล้วจึงไม่กลับมา
+    db.audit("scope.update", "scope", f"กฎ {len(clean['rules'])} ข้อ require_context={clean['require_context']}")
+    return scope_get()
+
+
+@router.post("/scope/test")
+async def scope_test(body: ScopeTestBody):
+    """ลองข้อความกับขอบเขต "โดยไม่เรียกโมเดล": บอกว่าจะถูกตอบตายตัวไหม และคลังความรู้ค้นเจออะไร"""
+    rule = guard.check_rules(body.message)
+    if rule:
+        return {"decision": rule, "hits": []}
+    hits: list = []
+    if body.use_kb:
+        hits = (await kb.search(body.message)).get("hits", [])
+    miss = guard.check_context(body.message, hits, body.use_kb)
+    return {"decision": miss, "hits": [{"title": h["title"], "score": h["score"]} for h in hits],
+            "smalltalk": guard.is_smalltalk(body.message)}
 
 
 # ====================================================================== ชุดข้อมูล
@@ -501,6 +574,25 @@ def datasets_scan_one(dataset_id: str):
     return datasets_mgr.scan_dataset(dataset_id)
 
 
+@router.get("/datasets/{dataset_id}/examples")
+def datasets_examples(dataset_id: str):
+    """ตัวอย่างทั้งหมดของชุดข้อมูลที่สร้างเอง สำหรับหน้าตารางแก้ไข"""
+    if not store.get_dataset(dataset_id) or not dataset_id.startswith("custom-"):
+        raise HTTPException(404, "ไม่พบชุดข้อมูลนี้ (แก้ไขได้เฉพาะชุดข้อมูลที่สร้างเอง)")
+    return datasets_mgr.all_examples(dataset_id)
+
+
+@router.put("/datasets/{dataset_id}/examples")
+def datasets_replace(dataset_id: str, body: ExamplesBody):
+    """บันทึกตารางที่แก้แล้วเป็นเวอร์ชันใหม่ (แทนที่ทั้งชุด)"""
+    if not store.get_dataset(dataset_id) or not dataset_id.startswith("custom-"):
+        raise HTTPException(404, "ไม่พบชุดข้อมูลนี้ (แก้ไขได้เฉพาะชุดข้อมูลที่สร้างเอง)")
+    try:
+        return datasets_mgr.replace_examples(dataset_id, body.examples, body.note)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
 @router.post("/datasets/{dataset_id}/append")
 def datasets_append(dataset_id: str, body: ExamplesBody):
     if not store.get_dataset(dataset_id) or not dataset_id.startswith("custom-"):
@@ -534,6 +626,9 @@ class FromFactsBody(BaseModel):
     augment: bool = True
     include_defaults: bool = True
     add_eval: bool = True
+    out_of_scope: list[str] | None = None   # None = ใช้รายการเริ่มต้น, [] = ไม่ใส่
+    unknown_answer: str | None = None       # คำตอบเมื่อไม่มีข้อมูล (ว่าง = ข้อความเริ่มต้น)
+    rag_format: bool = False                # 0.8.2: แนบเอกสารอ้างอิงในตัวอย่างเทรน (ให้ตรงกับตอนใช้งานจริงที่มีคลังความรู้)
 
 
 @router.post("/datasets/from-facts")
@@ -543,7 +638,7 @@ def datasets_from_facts(body: FromFactsBody):
         raise HTTPException(400, "ตั้งชื่อชุดข้อมูลก่อน")
     try:
         return datasets_mgr.from_facts(body.label.strip(), body.notes, body.facts, body.augment,
-                                       body.include_defaults, body.add_eval)
+                                       body.include_defaults, body.add_eval, body.out_of_scope, body.unknown_answer, body.rag_format)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -552,8 +647,66 @@ def datasets_from_facts(body: FromFactsBody):
 def datasets_facts_preview(body: FromFactsBody):
     """ดูตัวอย่างก่อนสร้าง: จำนวนตัวอย่างเทรน/ข้อสอบ และตัวอย่างบางส่วน (ยังไม่บันทึกอะไร)"""
     import faqbuilder
-    r = faqbuilder.build(body.facts, body.augment, body.include_defaults)
-    return {"stats": r["stats"], "train_sample": r["train"][:6], "eval": r["eval"]}
+    r = faqbuilder.build(body.facts, body.augment, body.include_defaults, body.out_of_scope, body.unknown_answer, body.rag_format)
+    return {"stats": r["stats"], "train_sample": r["train"][:6], "eval": r["eval"],
+            "quality": datasets_mgr.quality_report(r["train"])}
+
+
+@router.get("/datasets/{dataset_id}/quality")
+def datasets_quality(dataset_id: str):
+    """รายงานความหลากหลายของชุดข้อมูลที่สร้างเอง (คำตอบซ้ำ/คำถามคล้ายกัน) ก่อนเอาไปเทรน"""
+    if not store.get_dataset(dataset_id) or not dataset_id.startswith("custom-"):
+        raise HTTPException(404, "ไม่พบชุดข้อมูลนี้")
+    return datasets_mgr.quality_report(datasets_mgr.read_jsonl(config.CUSTOM_DATASETS_DIR / f"{dataset_id}.jsonl"))
+
+
+class SuggestBody(BaseModel):
+    kind: str                      # "questions" = คิดคำถามเพิ่ม, "answers" = เขียนคำตอบอีกสำนวน
+    topic: str = ""
+    answer: str
+    questions: list[str] = []
+    n: int = 5
+    confirm: bool = False          # ผู้ใช้ต้องยืนยันว่ารู้ว่าข้อความจะถูกส่งให้ Gemini
+
+
+@router.post("/datasets/suggest")
+async def datasets_suggest(body: SuggestBody):
+    """ให้ Gemini ช่วยคิดคำถามสำนวนอื่น / คำตอบอีกสำนวน จากข้อความที่ผู้ใช้พิมพ์ในตารางข้อเท็จจริง (ต้องยืนยันก่อนส่ง
+    และบล็อกถ้าข้อความมีข้อมูลระบุตัวตน) ผลลัพธ์เป็นแค่ข้อเสนอ ผู้ใช้ตรวจ/แก้ก่อนใส่ในตาราง"""
+    import ai_provider
+    if body.kind not in ("questions", "answers"):
+        raise HTTPException(400, 'kind ต้องเป็น "questions" หรือ "answers"')
+    if not body.confirm:
+        raise HTTPException(400, "ต้องยืนยันก่อนส่งข้อความให้ Gemini")
+    text = "\n".join([body.topic, body.answer, *body.questions])
+    if any(f["type"] in datasets_mgr.BLOCKING_TYPES for f in datasets_mgr.scan_text(text)):
+        raise HTTPException(409, "ข้อความมีข้อมูลที่ระบุตัวตนได้ (เลขบัตร/HN/เบอร์ส่วนตัว ฯลฯ) จึงไม่ส่งให้ Gemini")
+    n = max(1, min(10, body.n))
+    if body.kind == "questions":
+        prompt = (f"ช่วยเขียนคำถามภาษาไทยที่ผู้ป่วยหรือญาติอาจพิมพ์ถามแชตบอตโรงพยาบาล เรื่อง \"{body.topic or 'ทั่วไป'}\" "
+                  f"ซึ่งคำตอบคือ: {body.answer}\nเขียนมา {n} ข้อ คนละสำนวนจริงๆ (สุภาพ/ห้วน/ภาษาพูด/พิมพ์สั้น/มีคำลงท้าย) "
+                  f"ห้ามซ้ำหรือใกล้เคียงกับที่มีแล้ว:\n" + "\n".join(body.questions[:20]) +
+                  "\nตอบเป็นบรรทัดละ 1 ข้อ ไม่ต้องใส่เลขข้อหรือสัญลักษณ์ ไม่ต้องมีคำอธิบายอื่น")
+    else:
+        prompt = (f"เขียนคำตอบต่อไปนี้ใหม่ {min(n, 4)} สำนวน ใจความ ตัวเลข เบอร์โทร และเวลาต้องเหมือนเดิมทุกตัว "
+                  f"แต่เรียบเรียงประโยคต่างกัน น้ำเสียงสุภาพแบบเจ้าหน้าที่หญิง ลงท้ายค่ะ/นะคะ ห้ามเพิ่มข้อมูลใหม่:\n{body.answer}\n"
+                  "ตอบเป็นบรรทัดละ 1 สำนวน ไม่ต้องใส่เลขข้อ ไม่ต้องมีคำอธิบายอื่น")
+    try:
+        out = await ai_provider.generate_text(prompt)
+    except ai_provider.AIProviderError as e:
+        return {"ok": False, "error": str(e)}
+    lines = [re.sub(r"^[\s\-•*\d.)]+", "", ln).strip() for ln in out.splitlines()]
+    have = {q.strip() for q in body.questions} | {body.answer.strip()}
+    items = [ln for ln in dict.fromkeys(lines) if ln and ln not in have][:n]
+    db.audit("ai.dataset_suggest", body.kind, f"ส่งข้อความตารางข้อเท็จจริง 1 เรื่อง ({len(text)} ตัวอักษร) ให้ Gemini", "admin")
+    return {"ok": True, "items": items}
+
+
+@router.get("/datasets/out-of-scope-default")
+def datasets_oos_default():
+    """รายการคำถามนอกขอบเขตเริ่มต้น + คำตอบเริ่มต้น ให้หน้าเว็บโหลดไปแก้เองได้"""
+    import faqbuilder
+    return {"questions": faqbuilder.DEFAULT_OUT_OF_SCOPE, "answer": faqbuilder.UNKNOWN_ANSWER}
 
 
 @router.get("/datasets/facts-template")
@@ -661,8 +814,28 @@ def eval_update_prompt(prompt_id: str, body: PromptPatch):
     return store.update_prompt(prompt_id, body.model_dump())
 
 
-async def run_eval(model: str, prompt_ids: list[str]) -> dict:
-    """รันโจทย์ชุดหนึ่งกับโมเดลหนึ่ง พร้อมตรวจเงื่อนไขอัตโนมัติและวัดเวลา/ความเร็ว แล้วบันทึกเป็นรอบทดสอบ"""
+async def _ask_like_production(model: str, text: str, system: str) -> dict:
+    """ถามแบบเดียวกับตอนใช้งานจริง (0.8.2): ด่านขอบเขต → ค้นคลังความรู้ → แนบข้อมูลอ้างอิง → เรียกโมเดล
+    คืนรูปแบบเดียวกับ ollama_client.chat เพิ่ม guard (ถ้าตอบตายตัวโดยไม่เรียกโมเดล) และ sources (ชื่อเอกสารที่ดึงมา)"""
+    decision = guard.check_rules(text)
+    hits: list[dict] = []
+    if not decision:
+        hits = (await kb.search(text)).get("hits", [])
+        decision = guard.check_context(text, hits, True)
+    if decision:
+        return {"reply": decision["reply"], "guard": decision["kind"], "sources": [h["title"] for h in hits]}
+    ctx = kb.build_context(hits)
+    sysmsg = f"{system}\n\n{ctx}".strip() if ctx else system
+    msgs = ([{"role": "system", "content": sysmsg}] if sysmsg else []) + [{"role": "user", "content": text}]
+    r = await ollama_client.chat(model, msgs)
+    r["sources"] = [h["title"] for h in hits]
+    return r
+
+
+async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> dict:
+    """รันโจทย์ชุดหนึ่งกับโมเดลหนึ่ง พร้อมตรวจเงื่อนไขอัตโนมัติและวัดเวลา/ความเร็ว แล้วบันทึกเป็นรอบทดสอบ
+    use_kb=True (0.8.2) = ทดสอบแบบมีคลังความรู้และด่านขอบเขตเหมือนใช้งานจริง (วัดผลที่ผู้ใช้เห็นจริง)"""
+    system = config.get_settings()["default_system_prompt"] if use_kb else ""
     all_prompts = {p["id"]: p for p in store.list_prompts()}
     run_id = store.new_run_id()
     results = []
@@ -670,7 +843,10 @@ async def run_eval(model: str, prompt_ids: list[str]) -> dict:
         prompt = all_prompts.get(pid)
         if not prompt:
             continue
-        r = await ollama_client.chat(model, [{"role": "user", "content": prompt["text"]}])
+        if use_kb:
+            r = await _ask_like_production(model, prompt["text"], system)
+        else:
+            r = await ollama_client.chat(model, [{"role": "user", "content": prompt["text"]}])
         err = "error" in r
         reply = f"(error: {r['error']})" if err else r["reply"]
         chk = {"passed": None, "missing": [], "violated": []} if err else evalx.check_reply(prompt, reply)
@@ -679,8 +855,9 @@ async def run_eval(model: str, prompt_ids: list[str]) -> dict:
             "rating": None, "red_flag": bool(prompt.get("red_flag")), "error": err,
             "passed": chk["passed"], "missing": chk["missing"], "violated": chk["violated"],
             "total_s": r.get("total_s"), "tokens_per_s": r.get("tokens_per_s"),
+            "guard": r.get("guard"), "sources": r.get("sources"),
         })
-    run = {"id": run_id, "model": model, "created_at": time.time(), "results": results,
+    run = {"id": run_id, "model": model, "created_at": time.time(), "results": results, "use_kb": use_kb,
            "summary": evalx.summarize(results)}
     store.save_run(run)
     return run
@@ -690,6 +867,7 @@ class CompareBody(BaseModel):
     models: list[str]
     prompt_ids: list[str] = []
     pinned_only: bool = False
+    use_kb: bool = False            # ทดสอบแบบมีคลังความรู้ + ด่านขอบเขตเหมือนใช้งานจริง
 
 
 def _select_prompts(prompt_ids: list[str], pinned_only: bool) -> list[str]:
@@ -711,7 +889,7 @@ async def eval_compare(body: CompareBody):
         raise HTTPException(400, "ยังไม่มีโจทย์ให้ทดสอบ")
     runs = {}
     for m in body.models:
-        runs[m] = await run_eval(m, ids)
+        runs[m] = await run_eval(m, ids, body.use_kb)
     rows = []
     for pid in ids:
         row: dict = {"prompt_id": pid, "answers": {}}
@@ -724,7 +902,7 @@ async def eval_compare(body: CompareBody):
         rows.append(row)
     return {"models": body.models, "rows": rows,
             "summaries": {m: r["summary"] for m, r in runs.items()},
-            "run_ids": {m: r["id"] for m, r in runs.items()}}
+            "run_ids": {m: r["id"] for m, r in runs.items()}, "use_kb": body.use_kb}
 
 
 @router.post("/registry/{vid}/eval")

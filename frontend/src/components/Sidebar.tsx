@@ -5,43 +5,47 @@ import {
   BookOpen, MessageSquare, Database, ShieldCheck, Server, X, type LucideIcon,
 } from "lucide-react";
 
-// เมนูแบ่งกลุ่มตามลำดับงานจริง: เตรียมข้อมูล → เทรน → ทดสอบ → นำไปใช้ → ระบบ
-const groups: { title: string; items: { to: string; label: string; icon: LucideIcon; end?: boolean }[] }[] = [
+// เมนูเรียงตามลำดับงานจริง อ่านจากบนลงล่างครั้งเดียวจบ: เตรียมข้อมูล → สร้างและทดสอบ → นำไปใช้ → ระบบ
+// match = เส้นทางทั้งหมดที่ถือว่า "อยู่ในเมนูนี้" (หน้ารวมหลายแท็บ เช่น โมเดล = ใช้งานจริง + ในเครื่อง + นำเข้า)
+interface NavItem { to: string; label: string; icon: LucideIcon; end?: boolean; match?: string[] }
+export const navGroups: { title: string; items: NavItem[] }[] = [
   {
     title: "",
     items: [{ to: "/", label: "ภาพรวม", icon: LayoutDashboard, end: true }],
   },
   {
-    title: "เตรียมข้อมูล",
+    title: "1 เตรียมข้อมูล",
     items: [
       { to: "/kb", label: "คลังความรู้", icon: BookOpen },
-      { to: "/datasets", label: "ชุดข้อมูลเทรน", icon: Database },
+      { to: "/datasets", label: "ชุดข้อมูลสอน", icon: Database },
     ],
   },
   {
-    title: "เทรนและทดสอบ",
+    title: "2 สร้างและทดสอบ",
     items: [
-      { to: "/train", label: "เทรนโมเดลใหม่", icon: FlaskConical },
-      { to: "/import", label: "นำเข้าโมเดล", icon: FolderInput },
+      { to: "/train", label: "เทรนโมเดลใหม่", icon: FlaskConical, match: ["/train", "/jobs"] },
+      { to: "/playground", label: "ลองคุยกับโมเดล", icon: MessageSquare },
       { to: "/eval", label: "ทดสอบและเปรียบเทียบ", icon: ClipboardCheck },
-      { to: "/playground", label: "Playground", icon: MessageSquare },
     ],
   },
   {
-    title: "นำไปใช้",
+    title: "3 นำไปใช้งาน",
     items: [
-      { to: "/registry", label: "ทะเบียนโมเดล", icon: ShieldCheck },
-      { to: "/models", label: "โมเดลใน Ollama", icon: Boxes },
+      { to: "/registry", label: "โมเดล", icon: Boxes, match: ["/registry", "/models", "/import"] },
+      { to: "/scope", label: "ขอบเขตและการเชื่อมต่อ", icon: ShieldCheck, match: ["/scope", "/connect"] },
     ],
   },
   {
     title: "ระบบ",
-    items: [
-      { to: "/system", label: "เครื่องและพื้นที่", icon: Server },
-      { to: "/settings", label: "ตั้งค่า", icon: Settings },
-    ],
+    items: [{ to: "/system", label: "เครื่องและตั้งค่า", icon: Settings, match: ["/system", "/settings", "/glossary"] }],
   },
 ];
+
+/** เส้นทางนี้อยู่ในเมนูข้อนี้ไหม (ตรงเป๊ะ หรืออยู่ใต้เส้นทางที่กำหนด) */
+export function isItemActive(item: NavItem, pathname: string): boolean {
+  if (item.end) return pathname === item.to;
+  return (item.match ?? [item.to]).some((m) => pathname === m || pathname.startsWith(m + "/"));
+}
 
 function Brand() {
   return (
@@ -58,26 +62,29 @@ function Brand() {
 }
 
 function Nav() {
+  const { pathname } = useLocation();
   return (
     <nav className="flex-1 px-3 py-4 space-y-4 overflow-y-auto">
-      {groups.map((g, gi) => (
+      {navGroups.map((g, gi) => (
         <div key={gi} className="space-y-1">
           {g.title && <div className="px-3 pb-1 text-[11px] uppercase tracking-wide text-base-500">{g.title}</div>}
-          {g.items.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
-                  isActive ? "bg-base-800 text-base-100 shadow-card" : "text-base-300 hover:bg-base-850 hover:text-base-100"
-                }`
-              }
-            >
-              <Icon size={17} strokeWidth={2} />
-              {label}
-            </NavLink>
-          ))}
+          {g.items.map((it) => {
+            const Icon = it.icon;
+            const active = isItemActive(it, pathname);
+            return (
+              <NavLink
+                key={it.to}
+                to={it.to}
+                aria-current={active ? "page" : undefined}
+                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm transition-colors ${
+                  active ? "bg-base-800 text-base-100 shadow-card" : "text-base-300 hover:bg-base-850 hover:text-base-100"
+                }`}
+              >
+                <Icon size={17} strokeWidth={2} />
+                {it.label}
+              </NavLink>
+            );
+          })}
         </div>
       ))}
     </nav>

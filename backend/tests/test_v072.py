@@ -24,5 +24,6 @@ def test_digest_keeps_all_val_points():
     job = SimpleNamespace(base_model="x", status="done", r=16, lora_alpha=16, num_train_epochs=3, learning_rate=2e-4,
                           max_seq_length=512, batch_size=1, grad_accum=8, sample_size=10, val_ratio=0.1, loss_points=pts)
     d = ai_digest.build_digest(job)
-    assert len(d["loss_points"]) <= ai_digest.MAX_POINTS + 4
-    assert sum(1 for p in d["loss_points"] if p["val_loss"] is not None) == 4
+    assert len(d["train_loss"]) + len(d["val_loss"]) <= ai_digest.MAX_POINTS + 4
+    assert len(d["val_loss"]) == 4 and all(p["val_loss"] is not None for p in d["val_loss"])
+    assert all(p["loss"] is not None for p in d["train_loss"])

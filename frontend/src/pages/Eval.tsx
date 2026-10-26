@@ -19,6 +19,7 @@ export default function Eval() {
   const [activeRun, setActiveRun] = useState<EvalRun | null>(null);
   const [leaderboard, setLeaderboard] = useState<LeaderboardRow[]>([]);
   const [running, setRunning] = useState(false);
+  const [useKb, setUseKb] = useState(false); // ทดสอบแบบมีคลังความรู้ + ขอบเขต
   const [newPromptText, setNewPromptText] = useState("");
   const [newPromptCat, setNewPromptCat] = useState("ทั่วไป");
   const [editing, setEditing] = useState<EvalPrompt | null>(null);
@@ -69,7 +70,7 @@ export default function Eval() {
     setRunning(true);
     setActiveRun(null);
     try {
-      const run = await api.runEval(selectedModel, Array.from(selectedPromptIds));
+      const run = await api.runEval(selectedModel, Array.from(selectedPromptIds), useKb);
       setActiveRun(run);
       loadRuns();
     } catch (e) {
@@ -170,7 +171,11 @@ export default function Eval() {
               </div>
             </div>
 
-            <div className="flex justify-end">
+            <div className="flex items-center justify-end gap-4 flex-wrap">
+              <label className="flex items-center gap-2 text-xs text-base-300 cursor-pointer">
+                <input type="checkbox" className="accent-accent-500" checked={useKb} onChange={(e) => setUseKb(e.target.checked)} />
+                ทดสอบแบบมีคลังความรู้และขอบเขต (เหมือนใช้งานจริง)
+              </label>
               <Button onClick={runTests} disabled={running || !selectedModel || selectedPromptIds.size === 0}>
                 <Play size={15} /> {running ? "กำลังทดสอบ..." : `รันทดสอบ (${selectedPromptIds.size} คำถาม)`}
               </Button>

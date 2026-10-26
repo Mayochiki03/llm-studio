@@ -4,8 +4,8 @@ import { rowsToFacts, factsToRows, emptyRow } from "../components/FactsBuilderDi
 
 describe("rowsToFacts", () => {
   it("แยกบรรทัดคำถามและ comma คำสำคัญ ตัดช่องว่าง", () => {
-    const f = rowsToFacts([{ topic: " เวลา ", answer: " เปิด 08.00 ", questions: "เปิดกี่โมง\n\n  ปิดกี่โมง  ", keywords: "08.00, 16.00，x", red_flag: true }]);
-    expect(f).toEqual([{ topic: "เวลา", answer: "เปิด 08.00", questions: ["เปิดกี่โมง", "ปิดกี่โมง"], keywords: ["08.00", "16.00", "x"], red_flag: true }]);
+    const f = rowsToFacts([{ topic: " เวลา ", answer: " เปิด 08.00 ", questions: "เปิดกี่โมง\n\n  ปิดกี่โมง  ", answers_alt: "เปิด 08.00 นะคะ\n", keywords: "08.00, 16.00，x", red_flag: true }]);
+    expect(f).toEqual([{ topic: "เวลา", answer: "เปิด 08.00", questions: ["เปิดกี่โมง", "ปิดกี่โมง"], answers_alt: ["เปิด 08.00 นะคะ"], keywords: ["08.00", "16.00", "x"], red_flag: true }]);
   });
   it("ข้ามแถวที่ไม่มีคำตอบหรือไม่มีคำถาม", () => {
     expect(rowsToFacts([emptyRow(), { ...emptyRow(), answer: "a" }, { ...emptyRow(), questions: "q" }])).toEqual([]);

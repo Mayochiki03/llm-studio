@@ -57,7 +57,7 @@ export default function Registry() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <Topbar title="ทะเบียนโมเดล" subtitle="ควบคุมว่าโมเดลตัวไหนถูกใช้งานจริง และย้อนกลับได้ทุกเมื่อ" />
+      <Topbar title="โมเดลที่ใช้งานจริง" subtitle="เลือกว่าโมเดลตัวไหนให้ระบบอื่นเรียกใช้ ต้องผ่านการตรวจก่อน และย้อนกลับได้ทุกเมื่อ" />
       <div className="p-4 md:p-8 space-y-5 max-w-5xl">
         <Card className="p-5">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -73,7 +73,7 @@ export default function Registry() {
               <Button variant="secondary" disabled={!!busy} onClick={() => confirm("ย้อนกลับไปใช้โมเดลที่ใช้ก่อนหน้า?") && run("rb", api.registryRollback, "ย้อนกลับแล้ว")}>
                 <RotateCcw size={14} /> ย้อนกลับเวอร์ชันก่อนหน้า
               </Button>
-              <Button variant="secondary" onClick={() => setAdding(true)}><Plus size={14} /> ลงทะเบียนเอง</Button>
+              <Button variant="secondary" onClick={() => setAdding(true)}><Plus size={14} /> เพิ่มโมเดลเอง</Button>
             </div>
           </div>
         </Card>
@@ -88,8 +88,8 @@ export default function Registry() {
         </label>
 
         {list === null ? <Spinner /> : shown.length === 0 ? (
-          <Card><Empty icon={<ShieldCheck size={32} />} title="ยังไม่มีโมเดลในทะเบียน"
-            hint="โมเดลที่สร้างเข้า Ollama จากหน้างานเทรนจะมาลงทะเบียนที่นี่เอง หรือกด 'ลงทะเบียนเอง' สำหรับโมเดลที่มีอยู่แล้ว" /></Card>
+          <Card><Empty icon={<ShieldCheck size={32} />} title="ยังไม่มีโมเดลในรายการนี้"
+            hint="โมเดลที่สร้างเข้า Ollama จากหน้างานเทรนจะมาลงทะเบียนที่นี่เอง หรือกด 'เพิ่มโมเดลเอง' สำหรับโมเดลที่มีอยู่แล้ว" /></Card>
         ) : (
           <div className="space-y-3">
             {shown.map((v) => {
@@ -143,7 +143,7 @@ export default function Registry() {
                     )}
                     {v.status !== "active" && (
                       <Button variant="ghost" className="text-xs py-1.5 hover:text-bad" disabled={!!busy}
-                        onClick={() => confirm("ลบออกจากทะเบียน? (ไม่ลบโมเดลใน Ollama)") && run("d" + v.id, () => api.registryDelete(v.id), "ลบแล้ว")}><Trash2 size={13} /> ลบ</Button>
+                        onClick={() => confirm("ลบออกจากรายการนี้? (ไม่ลบโมเดลใน Ollama)") && run("d" + v.id, () => api.registryDelete(v.id), "ลบแล้ว")}><Trash2 size={13} /> ลบ</Button>
                     )}
                   </div>
                 </Card>
@@ -177,13 +177,13 @@ function AddDialog({ onClose, onDone }: { onClose: () => void; onDone: () => voi
   async function save() {
     try {
       await api.registryAdd(name.trim(), "", notes);
-      toast("ลงทะเบียนแล้ว");
+      toast("เพิ่มโมเดลแล้ว");
       onDone();
     } catch (e) { toast(errText(e), "bad"); }
   }
   return (
-    <Modal title="ลงทะเบียนโมเดล" onClose={onClose}
-      footer={<><Button variant="ghost" onClick={onClose}>ยกเลิก</Button><Button onClick={save} disabled={!name.trim()}>ลงทะเบียน</Button></>}>
+    <Modal title="เพิ่มโมเดลเข้ารายการ" onClose={onClose}
+      footer={<><Button variant="ghost" onClick={onClose}>ยกเลิก</Button><Button onClick={save} disabled={!name.trim()}>เพิ่ม</Button></>}>
       <Field label="ชื่อโมเดลใน Ollama" hint="เลือกจากรายการหรือพิมพ์เอง">
         <TextInput list="ollama-names" value={name} onChange={(e) => setName(e.target.value)} />
         <datalist id="ollama-names">{models.map((m) => <option key={m} value={m} />)}</datalist>
@@ -207,7 +207,7 @@ function NotesDialog({ v, onClose, onDone }: { v: ModelVersion; onClose: () => v
 }
 
 const EVENT_LABEL: Record<string, string> = {
-  register: "ลงทะเบียน", approve: "อนุมัติ", activate: "เปิดใช้งานจริง", archive: "เก็บถาวร", rollback: "ย้อนกลับ", eval: "ทดสอบ", notes: "แก้บันทึก",
+  register: "เพิ่มเข้ารายการ", approve: "อนุมัติ", activate: "เปิดใช้งานจริง", archive: "เก็บถาวร", rollback: "ย้อนกลับ", eval: "ทดสอบ", notes: "แก้บันทึก",
 };
 
 function EventsDialog({ v, onClose }: { v: ModelVersion; onClose: () => void }) {

@@ -5,7 +5,7 @@ import { Card } from "../components/Card";
 import Button from "../components/Button";
 import { api, ApiError } from "../api/client";
 import type { BaseModel, DatasetOption, Hardware, PiiScan, PreflightResult } from "../types";
-import { Check, Cpu, Database, Sliders, Rocket, AlertTriangle, Plus, Trash2, X, Search, Sparkles, Zap, Scale, Gem, CalendarClock } from "lucide-react";
+import { Check, Cpu, Database, Sliders, Rocket, AlertTriangle, Plus, Trash2, X, Search, Sparkles, Zap, Scale, Gem, CalendarClock, BookOpen } from "lucide-react";
 import { Meter, Modal, NumberInput, Notice, Pill, TextArea, Toggle, inputCls } from "../components/ui";
 import { PiiSummary } from "./Datasets";
 import { toast, errText } from "../components/toast";
@@ -29,10 +29,21 @@ interface Preset {
   val: number;
 }
 const PRESETS: Preset[] = [
+  // ค่าที่ลองแล้วได้ผลกับชุด FAQ ที่สร้างจากตารางข้อเท็จจริง (ราว 800 ตัวอย่าง): 3 รอบพอ เพราะ val_loss นิ่งหลังรอบที่ ~2.7, ความยาว 512 พอสำหรับถามตอบสั้น
+  { id: "faq", label: "FAQ ชุดข้อมูลเล็ก (แนะนำ)", icon: BookOpen, desc: "ถามตอบสั้นจากตารางข้อเท็จจริง ราว 300-1,000 ตัวอย่าง", time: "ประมาณ 15-40 นาที (ตามจำนวนข้อมูล)", r: 32, epochs: 2, seq: 512, sample: 2000, lr: 2e-4, val: 0.1 },
   { id: "quick", label: "ทดลองเร็ว", icon: Zap, desc: "เช็คว่าระบบและข้อมูลใช้ได้ ผลยังไม่ละเอียด", time: "ประมาณ 10-30 นาที", r: 8, epochs: 1, seq: 512, sample: 500, lr: 2e-4, val: 0 },
-  { id: "balanced", label: "สมดุล (แนะนำ)", icon: Scale, desc: "คุณภาพกับเวลาพอดีสำหรับใช้งานทั่วไป", time: "ประมาณ 1-3 ชม.", r: 16, epochs: 2, seq: 1024, sample: 2000, lr: 2e-4, val: 0.1 },
+  { id: "balanced", label: "สมดุล", icon: Scale, desc: "คุณภาพกับเวลาพอดีสำหรับใช้งานทั่วไป", time: "ประมาณ 1-3 ชม.", r: 16, epochs: 2, seq: 1024, sample: 2000, lr: 2e-4, val: 0.1 },
   { id: "quality", label: "คุณภาพสูง", icon: Gem, desc: "ข้อมูลยาว เรียนละเอียด ต้องใช้การ์ดจอใหญ่", time: "ประมาณ 3-8 ชม.", r: 32, epochs: 3, seq: 2048, sample: 5000, lr: 1e-4, val: 0.1 },
 ];
+
+/** ตรวจชื่อโมเดลผลลัพธ์: ไม่ว่าง ใช้ตัวอักษรที่ Ollama รับได้ และไม่ซ้ำกับงานที่ยังใช้อยู่ — คืนข้อความ error หรือ "" ถ้าใช้ได้ */
+export function checkOutputName(name: string, used: string[]): string {
+  const n = name.trim();
+  if (!n) return "ต้องตั้งชื่อโมเดลผลลัพธ์";
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(n)) return "ใช้ได้เฉพาะ a-z, 0-9, จุด, ขีดกลาง, ขีดล่าง (ไม่เกิน 64 ตัว)";
+  if (used.some((u) => u.toLowerCase() === n.toLowerCase())) return `มีงานที่ใช้ชื่อ ${n} อยู่แล้ว ลองเปลี่ยนเป็น ${n}-v2`;
+  return "";
+}
 
 export default function NewTraining() {
   const nav = useNavigate();
@@ -43,13 +54,17 @@ export default function NewTraining() {
   const [baseModel, setBaseModel] = useState("");
   const [dataset, setDataset] = useState("");
   const [outputName, setOutputName] = useState("my-model-lora");
-  const [r, setR] = useState(8);
-  const [loraAlpha, setLoraAlpha] = useState(8);
+  const [usedNames, setUsedNames] = useState<string[]>([]); // ชื่อผลลัพธ์ของงานที่ยังใช้อยู่ (กันซ้ำ)
+  useEffect(() => {
+    api.listJobs().then((js) => setUsedNames(js.filter((j) => j.status !== "failed" && j.status !== "stopped").map((j) => j.output_name))).catch(() => {});
+  }, []);
+  const [r, setR] = useState(32);
+  const [loraAlpha, setLoraAlpha] = useState(32);
   const [maxSeqLength, setMaxSeqLength] = useState(512);
-  const [epochs, setEpochs] = useState(1);
+  const [epochs, setEpochs] = useState(2);
   const [sampleSize, setSampleSize] = useState(2000);
   const [mode, setMode] = useState<"easy" | "adv">("easy");
-  const [presetId, setPresetId] = useState("balanced");
+  const [presetId, setPresetId] = useState("faq");
   const [lr, setLr] = useState(2e-4);
   const [batchSize, setBatchSize] = useState(0);
   const [gradAccum, setGradAccum] = useState(0);
@@ -111,7 +126,7 @@ export default function NewTraining() {
 
   // ตั้งค่าเริ่มต้นตามการ์ดจอครั้งเดียวหลังรู้ VRAM
   useEffect(() => {
-    if (hw) applyPreset(vram >= 20 ? "balanced" : vram > 0 && vram < 6 ? "quick" : "balanced");
+    if (hw) applyPreset("faq");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hw]);
 
@@ -153,7 +168,8 @@ export default function NewTraining() {
   }
 
   const selectedBase = baseModels.find((m) => m.id === baseModel);
-  const canGoNext = step === 0 ? !!baseModel : step === 1 ? !!dataset : step === 2 ? !!outputName.trim() : true;
+  const nameError = checkOutputName(outputName, usedNames);
+  const canGoNext = step === 0 ? !!baseModel : step === 1 ? !!dataset : step === 2 ? !nameError : true;
 
   async function startTraining(opts: { pii_ack?: boolean; force?: boolean } = {}) {
     setSubmitting(true);
@@ -391,11 +407,12 @@ export default function NewTraining() {
 
             <Field label="ชื่อโมเดลผลลัพธ์" hint="ตั้งให้จำง่าย เช่น sud-followup-v2 (ใช้เป็นชื่อใน Ollama ด้วย)">
               <input value={outputName} onChange={(e) => setOutputName(e.target.value)} className={inputCls} />
+              {nameError && <p className="text-xs text-red-300 mt-1.5">{nameError}</p>}
             </Field>
 
             {mode === "easy" && (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
                   {PRESETS.map((p) => (
                     <button key={p.id} onClick={() => applyPreset(p.id)}
                       className={`text-left p-4 rounded-lg border transition-colors ${presetId === p.id ? "border-accent-500 bg-accent-500/5" : "border-base-800 hover:border-base-700"}`}>
@@ -528,7 +545,7 @@ export default function NewTraining() {
               ถัดไป
             </Button>
           ) : (
-            <Button onClick={() => startTraining()} disabled={submitting || !outputName.trim()}>
+            <Button onClick={() => startTraining()} disabled={submitting || !!nameError}>
               {submitting ? "กำลังส่งเข้าคิว..." : startAt ? "ตั้งเวลาเทรน" : "เริ่มเทรน"} <Rocket size={15} />
             </Button>
           )}

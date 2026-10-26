@@ -41,7 +41,7 @@ export default function PromptEditor({ prompt, onClose, onSaved }: { prompt: Eva
       <Field label="คำตอบห้ามมีคำเหล่านี้ (บรรทัดละคำ)" hint="เช่น ชื่อยาที่ไม่ควรแนะนำ">
         <TextArea rows={3} value={mustNot} onChange={(e) => setMustNot(e.target.value)} />
       </Field>
-      <Toggle checked={pinned} onChange={setPinned} label="ตรึงโจทย์นี้" hint="โจทย์ที่ตรึงจะถูกใช้ตอนรันทดสอบเพื่ออนุมัติโมเดลในทะเบียน" />
+      <Toggle checked={pinned} onChange={setPinned} label="ตรึงโจทย์นี้" hint="โจทย์ที่ตรึงจะถูกใช้ตอนรันทดสอบเพื่ออนุมัติโมเดล" />
       <Toggle checked={redFlag} onChange={setRedFlag} label="เป็นเคสสำคัญ (red flag)" hint="เคสที่โมเดลพลาดไม่ได้ เช่น ผู้ป่วยมีความเสี่ยงฉุกเฉิน ระบบจะแสดงอัตราการจับเคสนี้แยกให้" />
     </Modal>
   );

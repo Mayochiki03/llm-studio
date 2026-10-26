@@ -22,10 +22,10 @@ def test_digest_ไม่มีข้อมูลลับ():
     blob = ai_digest.build_prompt(d)
     for secret in ["ข้อมูลลับ", "โมเดลชื่อลับ", "สมชาย", "1234567", "secret", "E:\\"]:
         assert secret not in blob
-    assert len(d["loss_points"]) <= ai_digest.MAX_POINTS
-    assert d["loss_points"][0]["step"] == 0 or d["loss_points"][0]["step"] == 2  # คงจุดแรกไว้
-    assert d["loss_points"][-1]["step"] == 198                                    # คงจุดท้ายไว้
-    assert set(d) == {"base_model", "status", "settings", "loss_points"}
+    assert len(d["train_loss"]) + len(d["val_loss"]) <= ai_digest.MAX_POINTS + 4
+    assert d["train_loss"][0]["step"] in (0, 2)  # คงจุดแรกไว้
+    assert d["train_loss"][-1]["step"] == 198    # คงจุดท้ายไว้
+    assert set(d) == {"base_model", "status", "settings", "train_loss", "val_loss"}
 
 
 @pytest.fixture

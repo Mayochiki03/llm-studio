@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import traceback
 import uuid
@@ -47,7 +48,7 @@ from jobs import PROJECT_ROOT, _subprocess_env, manager, pump_process
 load_dotenv(Path(__file__).parent / ".env")  # ไม่บังคับ: GEMINI_API_KEY=... เก็บไว้ที่นี่
 
 HF_API = "https://huggingface.co/api"
-APP_VERSION = "0.7.3"
+APP_VERSION = "0.8.2"
 
 
 async def _auto_backup_loop():
@@ -301,7 +302,7 @@ async def job_ai_summary(job_id: str, req: AiSummaryRequest):
         text = await ai_provider.generate_text(ai_digest.build_prompt(digest))
     except ai_provider.AIProviderError as e:
         return {"ok": False, "error": str(e)}
-    db.audit("ai.job_summary", job_id, f"ส่งตัวเลข loss {len(digest['loss_points'])} จุดให้ Gemini (ไม่มีเนื้อหาข้อมูล)", "admin")
+    db.audit("ai.job_summary", job_id, f"ส่งตัวเลข loss {len(digest['train_loss']) + len(digest['val_loss'])} จุดให้ Gemini (ไม่มีเนื้อหาข้อมูล)", "admin")
     return {"ok": True, "text": text}
 
 
@@ -342,6 +343,15 @@ async def create_job(req: CreateJobRequest):
     """สร้างงานเทรนเข้าคิว — ตรวจ 2 ด่านก่อน: ข้อมูลระบุตัวตน (PII) และ Preflight (VRAM/RAM/ดิสก์)
     ด่านไหนไม่ผ่านจะตอบ 409 พร้อมรายละเอียด ให้หน้าเว็บแสดงและให้ผู้ใช้ตัดสินใจ (ยืนยัน/ฝืน) ได้"""
     fields = req.model_dump(exclude={"pii_ack", "force"})
+    # 0.8.0: ชื่อผลลัพธ์ต้องไม่ว่าง ใช้เป็นชื่อใน Ollama ได้ (a-z 0-9 . _ -) และไม่ซ้ำกับงานที่ยังใช้อยู่ (กันเขียนทับโมเดลเดิม)
+    name = (req.output_name or "").strip()
+    if not name:
+        raise HTTPException(400, "ต้องตั้งชื่อโมเดลผลลัพธ์")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", name):
+        raise HTTPException(400, "ชื่อโมเดลใช้ได้เฉพาะ a-z, 0-9, จุด, ขีดกลาง, ขีดล่าง (ไม่เกิน 64 ตัว) และขึ้นต้นด้วยตัวอักษร/ตัวเลข")
+    if any(j.output_name.lower() == name.lower() and j.status not in ("failed", "stopped") for j in manager.jobs.values()):
+        raise HTTPException(409, {"code": "name_taken", "message": f"มีงานเทรนที่ใช้ชื่อ {name} อยู่แล้ว เปลี่ยนชื่อ (เช่น {name}-v2) เพื่อไม่ให้เขียนทับ"})
+    fields["output_name"] = name
     if req.template_mode not in ("auto", "legacy"):
         raise HTTPException(400, 'template_mode ต้องเป็น "auto" หรือ "legacy"')
     if not fields["params_b"]:
@@ -640,11 +650,12 @@ def eval_delete_prompt(prompt_id: str):
 class RunEvalRequest(BaseModel):
     model: str
     prompt_ids: list[str]
+    use_kb: bool = False            # 0.8.2: ทดสอบแบบมีคลังความรู้ + ด่านขอบเขต
 
 
 @app.post("/api/eval/run")
 async def eval_run(req: RunEvalRequest):
-    return await api_studio.run_eval(req.model, req.prompt_ids)
+    return await api_studio.run_eval(req.model, req.prompt_ids, req.use_kb)
 
 
 @app.get("/api/eval/runs")

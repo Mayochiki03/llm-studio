@@ -1,6 +1,6 @@
 // Playground: คุยกับโมเดลใน Ollama แบบสตรีม เลือกได้ว่าจะให้ดึงความรู้จากคลังมาช่วยตอบหรือไม่ และเห็นแหล่งที่มา
 import { useEffect, useRef, useState } from "react";
-import { Send, Square, Trash2, BookOpen, SlidersHorizontal, MessageSquare } from "lucide-react";
+import { Send, Square, Trash2, BookOpen, SlidersHorizontal, MessageSquare, ShieldCheck } from "lucide-react";
 import Topbar from "../components/Topbar";
 import Button from "../components/Button";
 import { Card } from "../components/Card";
@@ -18,6 +18,7 @@ interface Msg {
   note?: string;
   stats?: string;
   error?: boolean;
+  guard?: string; // ถูกตอบตามกฎขอบเขต (ชนิด/ชื่อกฎ) ไม่ได้ผ่านโมเดล
 }
 
 // เก็บบทสนทนาและตัวเลือกไว้ใน localStorage ของเบราว์เซอร์: สลับหน้า เปิดแท็บใหม่ หรือปิดเปิดเบราว์เซอร์แล้วยังอยู่
@@ -25,7 +26,7 @@ interface Msg {
 // จำกัดแค่ข้อความล่าสุด MAX_KEEP ข้อความ กันเต็มโควตา ห่อ try/catch เผื่อเบราว์เซอร์ปิดการเก็บข้อมูล
 const SAVE_KEY = "llmstudio.playground.v1";
 const MAX_KEEP = 100;
-interface Saved { msgs: Msg[]; model: string; useKb: boolean; system: string | null; temp: number; input: string }
+interface Saved { msgs: Msg[]; model: string; useKb: boolean; scopeOn: boolean; system: string | null; temp: number; input: string }
 
 function loadSaved(): Partial<Saved> {
   try {
@@ -51,6 +52,7 @@ export default function Playground() {
   const [models, setModels] = useState<string[]>([]);
   const [model, setModel] = useState(saved.model ?? "");
   const [useKb, setUseKb] = useState(saved.useKb ?? true);
+  const [scopeOn, setScopeOn] = useState(saved.scopeOn ?? true);
   const [system, setSystem] = useState(saved.system ?? "");
   const [temp, setTemp] = useState(typeof saved.temp === "number" ? saved.temp : 0.7);
   const [showOpts, setShowOpts] = useState(false);
@@ -88,13 +90,13 @@ export default function Playground() {
   // บันทึกสถานะทุกครั้งที่เปลี่ยน
   useEffect(() => {
     try {
-      const data: Saved = { msgs, model, useKb, system, temp, input };
+      const data: Saved = { msgs, model, useKb, scopeOn, system, temp, input };
       data.msgs = msgs.slice(-MAX_KEEP);
       localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     } catch {
       /* เก็บไม่ได้ก็ไม่เป็นไร แค่ไม่จำข้ามหน้า */
     }
-  }, [msgs, model, useKb, system, temp, input]);
+  }, [msgs, model, useKb, scopeOn, system, temp, input]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" }); // ต้องไม่ return ค่า ไม่งั้น React เรียกเป็นฟังก์ชันล้างแล้วพัง (destroy is not a function)
@@ -112,9 +114,9 @@ export default function Playground() {
     const patchLast = (fn: (m: Msg) => Msg) => setMsgs((p) => p.map((m, i) => (i === p.length - 1 ? fn(m) : m)));
     try {
       await api.playground(
-        { model, message: text, history, use_kb: useKb, system_prompt: system, temperature: temp },
+        { model, message: text, history, use_kb: useKb, system_prompt: system, temperature: temp, apply_scope: scopeOn },
         (ev) => {
-          if (ev.type === "sources") patchLast((m) => ({ ...m, hits: ev.hits, mode: ev.mode, note: ev.note }));
+          if (ev.type === "sources") patchLast((m) => ({ ...m, hits: ev.hits, mode: ev.mode, note: ev.note, guard: ev.guard ? `${ev.guard.kind}|${ev.guard.rule}` : undefined }));
           else if (ev.type === "delta") patchLast((m) => ({ ...m, content: m.content + ev.text }));
           else if (ev.type === "error") patchLast((m) => ({ ...m, content: m.content || ev.error, error: true }));
           else if (ev.type === "done") {
@@ -140,7 +142,7 @@ export default function Playground() {
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
-      <Topbar title="Playground" subtitle="ลองถามโมเดลจริงพร้อมคลังความรู้ ก่อนนำไปใช้งาน" />
+      <Topbar title="ลองคุยกับโมเดล" subtitle="ลองถามโมเดลจริงพร้อมคลังความรู้และขอบเขตการตอบ ก่อนนำไปใช้งาน" />
 
       <div className="px-4 md:px-8 py-3 border-b border-base-800 flex flex-wrap items-center gap-3">
         <select value={model} onChange={(e) => setModel(e.target.value)} className="bg-base-850 border border-base-700 rounded-lg px-3 py-2 text-sm min-w-0 max-w-full">
@@ -150,6 +152,10 @@ export default function Playground() {
         <label className="flex items-center gap-2 text-sm text-base-300 cursor-pointer select-none">
           <input type="checkbox" checked={useKb} onChange={(e) => setUseKb(e.target.checked)} className="accent-accent-500" />
           <BookOpen size={14} /> ใช้คลังความรู้
+        </label>
+        <label className="flex items-center gap-2 text-sm text-base-300 cursor-pointer select-none" title="เปิด = ใช้กฎตอบตายตัวและเงื่อนไข 'ต้องมีเอกสาร' เหมือนที่ระบบอื่นเจอผ่าน API ปิด = ดูว่าโมเดลล้วนๆ ตอบอะไร">
+          <input type="checkbox" checked={scopeOn} onChange={(e) => setScopeOn(e.target.checked)} className="accent-accent-500" />
+          <ShieldCheck size={14} /> ใช้ขอบเขตการตอบ
         </label>
         <button onClick={() => setShowOpts((s) => !s)} className="text-xs text-base-400 hover:text-base-100 flex items-center gap-1.5">
           <SlidersHorizontal size={13} /> ตัวเลือก
@@ -190,6 +196,7 @@ export default function Playground() {
               </div>
               {m.role === "assistant" && (m.hits || m.stats) && (
                 <div className="space-y-1.5">
+                  {m.guard && <div className="text-[11px] text-warn">ตอบตามขอบเขตที่ตั้งไว้ ({m.guard.startsWith("red_flag") ? "เคสอันตราย" : m.guard.startsWith("blocked") ? "หัวข้อต้องห้าม" : "ไม่พบเอกสารที่เกี่ยวข้อง"}) ไม่ได้ผ่านโมเดล</div>}
                   {m.stats && <div className="text-[11px] text-base-500">{m.stats}</div>}
                   {m.mode && m.mode !== "off" && (
                     <details className="text-xs">

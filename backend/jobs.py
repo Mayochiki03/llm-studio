@@ -819,10 +819,36 @@ print(f"LLM_STUDIO: examples kept {len(dataset)} / {_before} (dropped {_before -
 if len(dataset) == 0:
     raise SystemExit("ไม่เหลือตัวอย่างหลังกรองความยาว ลองเพิ่มความยาวข้อความสูงสุด")
 
+def _group_split(groups, ratio, seed):
+    """แบ่ง index เป็น (train, val, กลุ่มที่เป็น val) โดยเอาทั้งกลุ่มไปฝั่งเดียวกัน จนจำนวนแถวฝั่ง val ถึงสัดส่วน ratio"""
+    import random as _random
+    order = list(dict.fromkeys(groups))
+    _random.Random(seed).shuffle(order)
+    count = {}
+    for g in groups:
+        count[g] = count.get(g, 0) + 1
+    target, got, chosen = int(len(groups) * ratio), 0, set()
+    for g in order:
+        if got >= target:
+            break
+        chosen.add(g)
+        got += count[g]
+    val_idx = [i for i, g in enumerate(groups) if g in chosen]
+    tr_idx = [i for i, g in enumerate(groups) if g not in chosen]
+    return tr_idx, val_idx, chosen
+
+
 eval_dataset = None
 if CFG["val_ratio"] > 0 and len(dataset) >= 20:
-    _split = dataset.train_test_split(test_size=CFG["val_ratio"], seed=3407)
-    dataset, eval_dataset = _split["train"], _split["test"]
+    if "group" in dataset.column_names:
+        # ชุดข้อมูลที่ระบบสร้างจากตารางข้อเท็จจริง: คำถามเดียวกันที่ต่างแค่คำนำหน้าอยู่กลุ่มเดียวกัน
+        # แบ่งชุดตรวจทีละกลุ่ม ไม่ให้สำนวนที่เกือบเหมือนกันไปอยู่คนละฝั่ง (กัน val_loss สวยเกินจริง)
+        _tr_idx, _val_idx, _val_groups = _group_split(dataset["group"], CFG["val_ratio"], 3407)
+        dataset, eval_dataset = dataset.select(_tr_idx), dataset.select(_val_idx)
+        print("LLM_STUDIO: split by group (" + str(len(_val_groups)) + " groups held out)")
+    else:
+        _split = dataset.train_test_split(test_size=CFG["val_ratio"], seed=3407)
+        dataset, eval_dataset = _split["train"], _split["test"]
     print(f"LLM_STUDIO: train {len(dataset)} / validation {len(eval_dataset)}")
 
 # ---------------------------------------------------------------- ตั้งค่าเทรน
@@ -859,6 +885,10 @@ if eval_dataset is not None:
     _ta_kwargs[_key] = "steps"
     _ta_kwargs["eval_steps"] = _save_steps
     _ta_kwargs["per_device_eval_batch_size"] = CFG["batch"]
+    # 0.8.0: จบเทรนแล้วโหลดจุดที่ val_loss ต่ำสุดมาใช้ (ไม่ใช่จุดสุดท้ายที่ท่องจำเกินไปแล้ว) — save/eval ถี่เท่ากันตามที่ต้องการ
+    _ta_kwargs["load_best_model_at_end"] = True
+    _ta_kwargs["metric_for_best_model"] = "eval_loss"
+    _ta_kwargs["greater_is_better"] = False
 
 _sft_params = inspect.signature(SFTTrainer.__init__).parameters
 _sft_kwargs = dict(

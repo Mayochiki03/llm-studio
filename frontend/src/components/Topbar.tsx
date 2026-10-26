@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
 import { Circle, Menu } from "lucide-react";
+import { useEmbedded } from "./embedded";
 
-export default function Topbar({ title, subtitle }: { title: string; subtitle?: string }) {
+/** force = ตัว Hub เรียกเอง (แสดงเสมอ) ส่วนหน้าลูกใน Hub จะถูกซ่อนหัวเรื่อง */
+export default function Topbar({ title, subtitle, force }: { title: string; subtitle?: string; force?: boolean }) {
+  const embedded = useEmbedded();
   const [healthy, setHealthy] = useState<boolean | null>(null);
 
   useEffect(() => {
@@ -19,6 +22,8 @@ export default function Topbar({ title, subtitle }: { title: string; subtitle?: 
       clearInterval(t);
     };
   }, []);
+
+  if (embedded && !force) return null;
 
   return (
     <header className="h-16 shrink-0 border-b border-base-800 bg-base-950/80 backdrop-blur px-4 md:px-8 flex items-center justify-between">
