@@ -65,8 +65,8 @@ export default function CompareResultView({ jobId, res }: { jobId: string; res: 
   async function copyFailed() {
     try { await navigator.clipboard.writeText(await api.compareFailedText(jobId)); toast("คัดลอกข้อที่พลาดแล้ว แปะส่งต่อได้เลย"); } catch (e) { toast(errText(e), "bad"); }
   }
-  async function dl(fmt: "csv" | "json") {
-    try { await downloadFile(`/eval/compare/jobs/${jobId}/export?format=${fmt}`, `compare-${jobId}.${fmt}`); } catch (e) { toast(errText(e), "bad"); }
+  async function dl(fmt: "csv" | "json" | "report") {
+    try { await downloadFile(`/eval/compare/jobs/${jobId}/export?format=${fmt}`, fmt === "report" ? `compare-${jobId}-report.md` : `compare-${jobId}.${fmt}`); } catch (e) { toast(errText(e), "bad"); }
   }
   async function makeDraft(model: string) {
     setDraftBusy(model);
@@ -87,6 +87,7 @@ export default function CompareResultView({ jobId, res }: { jobId: string; res: 
           <Button variant="secondary" className="text-xs py-1.5" onClick={copyFailed}><Copy size={13} /> คัดลอกเฉพาะข้อที่พลาด</Button>
           <Button variant="secondary" className="text-xs py-1.5" onClick={() => dl("csv")}><Download size={13} /> CSV (Excel)</Button>
           <Button variant="secondary" className="text-xs py-1.5" onClick={() => dl("json")}><Download size={13} /> JSON</Button>
+          <Button variant="secondary" className="text-xs py-1.5" onClick={() => dl("report")}><Download size={13} /> รายงานความมั่นใจ (.md)</Button>
         </div>
       </div>
 

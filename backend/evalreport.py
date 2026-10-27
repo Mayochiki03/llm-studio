@@ -164,3 +164,73 @@ def run_to_result(run: dict) -> dict:
                      "red_flag": r.get("red_flag"), "expect": r.get("expect", []), "must_not": r.get("must_not", []),
                      "answers": {m: {k: r.get(k) for k in ("response", "passed", "missing", "violated", "guard", "sources", "top_score", "reply_original", "total_s", "tokens_per_s")}}})
     return {"models": [m], "rows": rows, "summaries": {m: run.get("summary", {})}, "use_kb": run.get("use_kb", False)}
+
+
+# ---------------------------------------------------------------- รายงานความมั่นใจ (0.8.6) สำหรับให้หัวหน้า/ผู้ตัดสินใจอ่าน
+LIMITS = [
+    "ข้อสอบตรวจด้วยคำสำคัญ ผ่านข้อสอบไม่ได้แปลว่าตอบถูกในทุกสำนวน และบางข้อที่ตัดสินว่าพลาดอาจเป็นคำตอบถูกที่ใช้คำอื่น",
+    "ข้อสอบเขียนโดยทีมพัฒนา ผู้ใช้จริงจะถามในแบบที่เราคาดไม่ถึงได้เสมอ ยังไม่เคยทดสอบกับคำถามผู้ป่วยจริง",
+    "โมเดลขนาดเล็กอาจแต่งข้อมูลได้ แม้มีชั้นป้องกัน (ตรวจเลข, ขอบเขต, เคสอันตราย) ช่วยลดความเสี่ยงได้แต่ไม่ได้ขจัดทั้งหมด",
+    "ชั้นเคสอันตรายอาศัยคำสำคัญ ผู้ใช้ที่พูดอ้อมมากอาจไม่ตรงกฎ ต้องหมั่นเพิ่มคำจากกรณีจริง",
+    "ข้อมูลในคลังความรู้ตอนนี้เป็นข้อมูลสมมติ ต้องให้เจ้าหน้าที่ตรวจข้อมูลจริงก่อนใช้งาน",
+    "ระบบนี้เป็นผู้ช่วยตอบคำถามเบื้องต้น ไม่ใช่การวินิจฉัยหรือแทนที่เจ้าหน้าที่ ควรมีช่องทางส่งต่อคนเสมอ",
+]
+
+
+def _pct_s(a: int, b: int) -> str:
+    return f"{a}/{b} ({round(100 * a / b)}%)" if b else "-"
+
+
+def confidence_report(result: dict, title: str = "") -> str:
+    """รายงาน Markdown: ผลรวม, ผลรายกลุ่ม, ข้อที่ห้ามพลาด (red flag), ข้อที่พลาดในกลุ่มแหย่โมเดล, ข้อจำกัดที่ระบบรับประกันไม่ได้
+    เขียนให้คนที่ไม่ใช่นักพัฒนาอ่านเข้าใจ ไม่ใช้ศัพท์เทคนิคเกินจำเป็น"""
+    models = result.get("models", [])
+    rows = result.get("rows", [])
+    out = [f"# รายงานความมั่นใจของโมเดล{(' — ' + title) if title else ''}", ""]
+    out.append(f"ทดสอบ {len(rows)} ข้อ {'แบบมีคลังความรู้ (เหมือนใช้งานจริง)' if result.get('use_kb') else 'แบบไม่มีคลังความรู้'}")
+    out += ["", "## สรุปรายโมเดล", "", "| โมเดล | ผ่านเกณฑ์ | จับเคสอันตรายได้ | พลาดเคสอันตราย |", "|---|---|---|---|"]
+    rf_rows = [r for r in rows if r.get("red_flag")]
+    for m in models:
+        graded = [r for r in rows if (r.get("answers") or {}).get(m, {}).get("passed") is not None]
+        ok = sum(1 for r in graded if r["answers"][m]["passed"])
+        rf_ok = sum(1 for r in rf_rows if (r.get("answers") or {}).get(m, {}).get("passed"))
+        out.append(f"| {m} | {_pct_s(ok, len(graded))} | {_pct_s(rf_ok, len(rf_rows))} | {len(rf_rows) - rf_ok} ข้อ |")
+
+    cats: dict[str, list[dict]] = {}
+    for r in rows:
+        cats.setdefault(r.get("category") or "ทั่วไป", []).append(r)
+    out += ["", "## ผ่านกี่ข้อในแต่ละกลุ่มคำถาม", "", "| กลุ่ม | " + " | ".join(models) + " |", "|---|" + "---|" * len(models)]
+    for c, rs in cats.items():
+        cells = []
+        for m in models:
+            g = [r for r in rs if (r.get("answers") or {}).get(m, {}).get("passed") is not None]
+            cells.append(_pct_s(sum(1 for r in g if r["answers"][m]["passed"]), len(g)))
+        out.append(f"| {c} | " + " | ".join(cells) + " |")
+
+    out += ["", "## ข้อที่ห้ามพลาด (เคสอันตราย)", ""]
+    for m in models:
+        bad = [r for r in rf_rows if not (r.get("answers") or {}).get(m, {}).get("passed")]
+        if not rf_rows:
+            out.append(f"- {m}: ไม่มีข้อสอบเคสอันตรายในรอบนี้")
+        elif not bad:
+            out.append(f"- {m}: ตอบถูกครบทุกข้อ ({len(rf_rows)} ข้อ)")
+        else:
+            out.append(f"- {m}: **พลาด {len(bad)} ข้อ** ต้องแก้ก่อนใช้งานจริง")
+            for r in bad[:10]:
+                out.append(f"  - \"{r.get('prompt_text', '')}\"")
+
+    probe = [r for r in rows if str(r.get("category", "")).startswith("แหย่")]
+    if probe:
+        out += ["", "## ข้อที่พลาดในกลุ่มแหย่โมเดล", ""]
+        for m in models:
+            bad = [r for r in probe if (r.get("answers") or {}).get(m, {}).get("passed") is False]
+            out.append(f"### {m}: พลาด {len(bad)} จาก {len(probe)} ข้อ")
+            for r in bad[:15]:
+                a = r["answers"][m]
+                k = classify(r, a)
+                resp = " ".join(str(a.get("response", "")).split())[:160]
+                out.append(f"- ({str(r.get('category', '')).replace('แหย่: ', '')}) \"{r.get('prompt_text', '')}\" → {KINDS[k][0] if k else 'ไม่ผ่าน'}: {resp}")
+            out.append("")
+
+    out += ["## สิ่งที่ระบบนี้ยังรับประกันไม่ได้", ""] + [f"- {x}" for x in LIMITS]
+    return "\n".join(out).rstrip() + "\n"

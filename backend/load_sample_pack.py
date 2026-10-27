@@ -20,6 +20,7 @@ import store
 SAMPLES = Path(__file__).resolve().parent.parent / "samples"
 PACK_DIR = SAMPLES / "pack-01"
 PACK2_DIR = SAMPLES / "pack-02"
+PACK3_DIR = SAMPLES / "pack-03"
 PACK_LABEL = "ตัวอย่าง: FAQ โรงพยาบาลสมมติ (70 คู่)"
 PACK2_PREFIX = "ตัวอย่าง: FAQ โรงพยาบาลสมมติ v2"
 
@@ -77,12 +78,29 @@ def load_pack2(reset: bool = False, kb: bool = False, pack_dir: Path = PACK2_DIR
     return {"dataset_id": res["dataset_id"], "examples": res["examples"], "prompts": res["eval_added"], "kb_docs": kb_docs}
 
 
+def load_redteam(pack_dir: Path = PACK3_DIR) -> dict:
+    """แพ็ก 3: ข้อสอบแหย่โมเดล เพิ่มเข้ารายการโจทย์ (ไม่ล้างของเดิม ข้อความซ้ำข้าม) ไม่ปักหมุดเพื่อไม่ให้ปนกับชุดหลัก"""
+    prompts = json.loads((pack_dir / "redteam.json").read_text(encoding="utf-8"))
+    have = {p["text"] for p in store.list_prompts()}
+    added = 0
+    for p in prompts:
+        if p["text"] in have:
+            continue
+        store.add_prompt(p["text"], p.get("category", ""), p.get("expect"), p.get("must_not"), bool(p.get("red_flag")), False)
+        added += 1
+    return {"added": added, "total": len(prompts)}
+
+
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reset", action="store_true", help="ล้างโจทย์ทดสอบเดิมและชุดข้อมูลเองเดิมก่อนโหลด")
-    ap.add_argument("--pack", choices=["1", "2"], default="2", help="เลือกแพ็ก (ค่าเริ่มต้น 2)")
+    ap.add_argument("--pack", choices=["1", "2", "3"], default="2", help="เลือกแพ็ก (ค่าเริ่มต้น 2; 3 = ข้อสอบแหย่โมเดล เพิ่มเข้าไปโดยไม่ล้างของเดิม)")
     ap.add_argument("--kb", action="store_true", help="ใส่ข้อเท็จจริงเข้าคลังความรู้ด้วย (แพ็ก 2)")
     a = ap.parse_args()
+    if a.pack == "3":
+        r3 = load_redteam()
+        print(f"เพิ่มข้อสอบแหย่โมเดล {r3['added']} ข้อ (จากทั้งหมด {r3['total']} ข้อ ที่เหลือมีอยู่แล้ว)")
+        sys.exit(0)
     r = load_pack(a.reset) if a.pack == "1" else load_pack2(a.reset, a.kb)
     print(f"โหลดแล้ว: ชุดข้อมูล {r['examples']} ตัวอย่าง, โจทย์ทดสอบ {r['prompts']} ข้อ" + (f", คลังความรู้ {r['kb_docs']} เอกสาร" if r.get("kb_docs") else ""))
     sys.exit(0)

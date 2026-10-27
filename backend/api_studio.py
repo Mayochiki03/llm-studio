@@ -1046,7 +1046,7 @@ def eval_compare_analysis(job_id: str):
 
 @router.get("/eval/compare/jobs/{job_id}/export")
 def eval_compare_export(job_id: str, format: str = "csv"):
-    """ส่งออกผล: csv (เปิดใน Excel) | json (ครบทุกอย่างรวมวิเคราะห์) | failed (ข้อความเฉพาะข้อที่พลาด)"""
+    """ส่งออกผล: csv (เปิดใน Excel) | json (ครบทุกอย่างรวมวิเคราะห์) | failed (ข้อความเฉพาะข้อที่พลาด) | report (รายงานความมั่นใจ Markdown)"""
     j = compare_jobs.get(job_id)
     if not j or not j.get("result"):
         raise HTTPException(404, "ยังไม่มีผลให้ส่งออก")
@@ -1063,7 +1063,10 @@ def _export_response(result: dict, fmt: str, stem: str):
                         headers={"Content-Disposition": f'attachment; filename="{stem}.json"'})
     if fmt == "failed":
         return PlainTextResponse(evalreport.failed_text(result))
-    raise HTTPException(400, "format ต้องเป็น csv, json หรือ failed")
+    if fmt == "report":
+        return Response(evalreport.confidence_report(result), media_type="text/markdown; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}-report.md"'})
+    raise HTTPException(400, "format ต้องเป็น csv, json, failed หรือ report")
 
 
 @router.get("/eval/runs/{run_id}/export")
