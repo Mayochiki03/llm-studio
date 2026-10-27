@@ -1,7 +1,7 @@
 // การ์ดประจำโมเดล: ดูค่าเทรน/ชุดข้อมูล/ผลทดสอบ/สภาพคลังความรู้ในที่เดียว + ปุ่ม "เทรนใหม่ด้วยค่าเดิม"
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Copy, RefreshCw } from "lucide-react";
+import { Copy, RefreshCw, CheckCircle2, AlertTriangle, XCircle, Info, ChevronDown, ChevronRight } from "lucide-react";
 import Button from "./Button";
 import { Modal, Notice, Spinner, fmtDate, pct } from "./ui";
 import { toast, errText } from "./toast";
@@ -16,14 +16,56 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
     </div>
   );
 }
-function Section({ title, children }: { title: string; children: React.ReactNode }) {
+/** หัวข้อที่พับได้ (ค่าเริ่มต้นพับ) เพื่อให้หน้าแรกของการ์ดสั้นและอ่านจบในหนึ่งแวบ */
+function Section({ title, children, open: initOpen = false }: { title: string; children: React.ReactNode; open?: boolean }) {
+  const [open, setOpen] = useState(initOpen);
   return (
-    <div className="mb-4">
-      <div className="text-[11px] uppercase tracking-wide text-base-500 mb-1">{title}</div>
-      <div className="rounded-lg bg-base-900/60 px-3">{children}</div>
+    <div className="mb-2">
+      <button onClick={() => setOpen((v) => !v)} className="flex items-center gap-1.5 text-xs text-base-300 hover:text-base-100 py-1.5 w-full text-left">
+        {open ? <ChevronDown size={14} /> : <ChevronRight size={14} />} {title}
+      </button>
+      {open && <div className="rounded-lg bg-base-900/60 px-3 mb-1">{children}</div>}
     </div>
   );
 }
+
+const BADGE = {
+  good: { icon: CheckCircle2, cls: "text-good bg-good/10 border-good/20" },
+  warn: { icon: AlertTriangle, cls: "text-warn bg-warn/10 border-warn/20" },
+  bad: { icon: XCircle, cls: "text-bad bg-bad/10 border-bad/20" },
+  info: { icon: Info, cls: "text-accent-300 bg-accent-500/10 border-accent-500/20" },
+} as const;
+
+function Kpi({ label, value, tone }: { label: string; value: string; tone?: "good" | "bad" | "warn" }) {
+  const c = tone === "good" ? "text-good" : tone === "bad" ? "text-bad" : tone === "warn" ? "text-warn" : "text-base-100";
+  return (
+    <div className="rounded-lg bg-base-900/60 px-3 py-2.5">
+      <div className="text-[10px] text-base-500">{label}</div>
+      <div className={`text-lg font-semibold ${c}`}>{value}</div>
+    </div>
+  );
+}
+
+/** กราฟเส้น loss เล็กๆ (train = ฟ้า, val = เหลือง) วาดด้วย SVG ไม่พึ่งไลบรารี */
+export function LossSpark({ pts }: { pts: { step: number | null; train: number | null; val: number | null }[] }) {
+  const tr = pts.map((p, i) => [i, p.train] as const).filter((x): x is readonly [number, number] => typeof x[1] === "number");
+  const va = pts.map((p, i) => [i, p.val] as const).filter((x): x is readonly [number, number] => typeof x[1] === "number");
+  const all = [...tr, ...va].map((x) => x[1]);
+  if (all.length < 2) return null;
+  const max = Math.max(...all), min = Math.min(...all), W = 300, H = 70, n = Math.max(1, pts.length - 1);
+  const path = (xs: readonly (readonly [number, number])[]) =>
+    xs.map(([i, v], k) => `${k ? "L" : "M"}${(i / n) * W},${H - ((v - min) / Math.max(1e-6, max - min)) * (H - 6) - 3}`).join(" ");
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full h-16" preserveAspectRatio="none" role="img" aria-label="กราฟ loss">
+        <path d={path(tr)} fill="none" stroke="#60a5fa" strokeWidth="1.8" vectorEffect="non-scaling-stroke" />
+        {va.length > 1 && <path d={path(va)} fill="none" stroke="#fbbf24" strokeWidth="1.8" vectorEffect="non-scaling-stroke" />}
+      </svg>
+      <div className="flex gap-3 text-[10px] text-base-500"><span className="text-[#60a5fa]">— train</span><span className="text-[#fbbf24]">— val</span><span>ยิ่งต่ำยิ่งดี เส้นสองเส้นควรอยู่ใกล้กัน</span></div>
+    </div>
+  );
+}
+
 const f4 = (x: number | null | undefined) => (typeof x === "number" ? x.toFixed(3) : "-");
 
 /** ข้อความสรุปการ์ดแบบข้อความล้วน ไว้คัดลอกแปะลงเอกสาร/บันทึกของทีม */
@@ -62,6 +104,7 @@ export default function ModelCardDialog({ v, onClose }: { v: ModelVersion; onClo
   }
 
   const j = c?.job;
+  const rf = c?.eval.red_flag_recall;
   return (
     <Modal title={`การ์ดโมเดล ${v.name}`} onClose={onClose} wide
       footer={<>
@@ -70,17 +113,33 @@ export default function ModelCardDialog({ v, onClose }: { v: ModelVersion; onClo
       </>}>
       {!c ? <Spinner /> : (
         <>
-          <Section title="ที่มา">
+          <p className="text-sm text-base-100 mb-3">{c.headline ?? c.version.name}</p>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+            <Kpi label="ผ่านเกณฑ์" value={c.eval.at ? pct(c.eval.pass_rate) : "-"} />
+            <Kpi label="จับ red flag" value={c.eval.at ? pct(rf) : "-"} tone={rf == null ? undefined : rf >= 1 ? "good" : "bad"} />
+            <Kpi label="val loss" value={f4(j?.final_val_loss)} />
+            <Kpi label="รอบที่เทรน" value={j ? String(j.num_train_epochs) : "-"} />
+          </div>
+          {(c.badges ?? []).length > 0 && (
+            <div className="space-y-1.5 mb-3">
+              {(c.badges ?? []).map((b, i) => {
+                const B = BADGE[b.tone]; const Icon = B.icon;
+                return <div key={i} className={`flex items-start gap-2 text-xs rounded-lg border px-3 py-2 ${B.cls}`}><Icon size={14} className="shrink-0 mt-0.5" /><span>{b.text}</span></div>;
+              })}
+            </div>
+          )}
+          {(c.loss_curve ?? []).length > 1 && <div className="mb-3 rounded-lg bg-base-900/60 px-3 py-2.5"><LossSpark pts={c.loss_curve!} /></div>}
+
+          <Section title="ที่มาและบันทึก">
             <Row k="โมเดลฐาน" v={c.version.base_model || "-"} />
             <Row k="ชุดข้อมูล" v={`${c.dataset.id || "-"}${c.dataset.version ? ` v${c.dataset.version}` : ""}`} />
             <Row k="สร้างเมื่อ" v={fmtDate(c.version.created_at)} />
-            <Row k="บันทึกของเรา" v={c.version.notes || "ยังไม่มี (ควรบันทึกว่ารุ่นนี้แก้อะไรจากรุ่นก่อน)"} />
+            <Row k="บันทึกของเรา" v={c.version.notes || "ยังไม่มี"} />
           </Section>
           {j ? (
             <Section title="ค่าที่ใช้เทรน">
               <Row k="r / alpha" v={`${j.r} / ${j.lora_alpha}`} />
               <Row k="ความยาวข้อความสูงสุด" v={j.max_seq_length} />
-              <Row k="รอบ (epochs)" v={j.num_train_epochs} />
               <Row k="learning rate" v={j.learning_rate} />
               <Row k="สัดส่วนข้อมูลตรวจ (val)" v={j.val_ratio} />
               <Row k="batch / accum" v={`${j.batch_size || "อัตโนมัติ"} / ${j.grad_accum || "อัตโนมัติ"}`} />
@@ -92,8 +151,6 @@ export default function ModelCardDialog({ v, onClose }: { v: ModelVersion; onClo
             <Notice tone="warn">โมเดลนี้ไม่มีประวัติเทรนในระบบนี้ (เพิ่มเอง/นำเข้า) จึงไม่มีค่าเทรนและเทรนซ้ำด้วยค่าเดิมไม่ได้</Notice>
           )}
           <Section title="ผลทดสอบล่าสุด">
-            <Row k="ผ่านเกณฑ์" v={pct(c.eval.pass_rate)} />
-            <Row k="จับ red flag ได้" v={pct(c.eval.red_flag_recall)} />
             <Row k="วิธีทดสอบ" v={c.eval.at ? (c.eval.use_kb ? "มีคลังความรู้และขอบเขต" : "ไม่มีคลังความรู้ (วัดแค่ความจำโมเดล)") : "ยังไม่เคยทดสอบ"} />
             <Row k="จำนวนข้อ / เมื่อ" v={c.eval.at ? `${c.eval.n_prompts ?? c.eval.count ?? "-"} ข้อ / ${fmtDate(c.eval.at)}` : "-"} />
           </Section>
@@ -103,7 +160,7 @@ export default function ModelCardDialog({ v, onClose }: { v: ModelVersion; onClo
             <Row k="ค่าความเกี่ยวข้องขั้นต่ำ / จำนวนชิ้นที่ดึง" v={`${c.environment_now.kb_min_score} / ${c.environment_now.kb_top_k}`} />
             <Row k="รหัสขอบเขต+system prompt" v={c.environment_now.scope_hash} />
           </Section>
-          {c.retrain && <p className="text-[11px] text-base-500">เทรนใหม่จะกรอกค่าข้างบนให้ในหน้าเทรน ตั้งชื่อใหม่ให้อัตโนมัติ ({String(c.retrain.output_name)}) ไม่เขียนทับรุ่นเดิม และให้คุณตรวจก่อนกดเริ่ม</p>}
+          {c.retrain && <p className="text-[11px] text-base-500 mt-2">เทรนใหม่จะกรอกค่าเดิมให้ในหน้าเทรน ตั้งชื่อใหม่ให้อัตโนมัติ ({String(c.retrain.output_name)}) ไม่เขียนทับรุ่นเดิม และให้คุณตรวจก่อนกดเริ่ม</p>}
         </>
       )}
     </Modal>

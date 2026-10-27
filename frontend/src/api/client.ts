@@ -20,7 +20,7 @@ import type {
   KbHistory,
   DatasetVersion,
   PiiScan,
-  ModelVersion, ModelCard,
+  ModelVersion, ModelCard, CompareJob, CompareAnalysis, FactsDraft,
   ModelEvent,
   CompareResult,
   DiskInfo,
@@ -367,6 +367,18 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   registryNotes: (id: string, notes: string) => put<ModelVersion>(`/registry/${id}/notes`, { notes }),
   registryDelete: (id: string) => del<{ ok: boolean }>(`/registry/${id}`),
   registryEval: (id: string, use_kb = false) => post<ModelVersion>(`/registry/${id}/eval${use_kb ? "?use_kb=true" : ""}`),
+  compareStart: (models: string[], pinned_only: boolean, prompt_ids: string[], use_kb: boolean) =>
+    post<{ id: string; status: string }>("/eval/compare/start", { models, pinned_only, prompt_ids, use_kb }),
+  compareJobs: () => req<CompareJob[]>("/eval/compare/jobs"),
+  compareJob: (id: string) => req<CompareJob>(`/eval/compare/jobs/${id}`),
+  compareCancel: (id: string) => post<{ ok: boolean }>(`/eval/compare/jobs/${id}/cancel`),
+  compareAnalysis: (id: string) => req<CompareAnalysis>(`/eval/compare/jobs/${id}/analysis`),
+  compareDrafts: (id: string, model: string) => post<FactsDraft>(`/eval/compare/jobs/${id}/drafts`, { model }),
+  compareFailedText: async (id: string): Promise<string> => {
+    const res = await fetch(`${BASE}/eval/compare/jobs/${id}/export?format=failed`, { headers: authHeaders() });
+    if (!res.ok) throw await toError(res);
+    return res.text();
+  },
   registryCard: (id: string) => req<ModelCard>(`/registry/${id}/card`),
 
   // ระบบ

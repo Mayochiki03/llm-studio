@@ -5,6 +5,7 @@ import Button from "./Button";
 import { Field, Modal, Notice, TextArea, TextInput, Toggle } from "./ui";
 import { toast, errText } from "./toast";
 import { api, type DsQuality } from "../api/client";
+import type { FactsDraft } from "../types";
 
 export interface FactRow {
   topic: string;
@@ -54,9 +55,10 @@ export function QualityLine({ q }: { q: DsQuality }) {
   );
 }
 
-export default function FactsBuilderDialog({ onClose, onDone }: { onClose: () => void; onDone: () => void }) {
+export default function FactsBuilderDialog({ onClose, onDone, draft }: { onClose: () => void; onDone: () => void; draft?: FactsDraft | null }) {
   const [label, setLabel] = useState("");
-  const [rows, setRows] = useState<FactRow[]>([emptyRow()]);
+  // draft = ร่างจากข้อที่พลาดในหน้าทดสอบ: เติมเป็นแถวให้เลย (ช่องคำตอบที่ว่างต้องกรอกก่อน ไม่งั้นแถวนั้นไม่ถูกนำไปสร้าง)
+  const [rows, setRows] = useState<FactRow[]>(draft && draft.facts.length ? factsToRows(draft.facts) : [emptyRow()]);
   const [augment, setAugment] = useState(true);
   const [defaults, setDefaults] = useState(true);
   const [ragFormat, setRagFormat] = useState(false); // แนบเอกสารอ้างอิงในตัวอย่างเทรน (ตรงกับตอนใช้งานจริงที่มีคลังความรู้)
@@ -69,7 +71,7 @@ export default function FactsBuilderDialog({ onClose, onDone }: { onClose: () =>
   const [suggesting, setSuggesting] = useState<string | null>(null); // "คำถาม-i" / "คำตอบ-i" ที่กำลังรอ Gemini
 
   useEffect(() => {
-    api.dsOosDefault().then((d) => { setOos(d.questions.join("\n")); setUnknownAns(d.answer); setOosLoaded(true); }).catch(() => setOosLoaded(true));
+    api.dsOosDefault().then((d) => { setOos([...d.questions, ...(draft?.oos ?? [])].join("\n")); setUnknownAns(d.answer); setOosLoaded(true); }).catch(() => setOosLoaded(true));
   }, []);
 
   const facts = rowsToFacts(rows);

@@ -10,7 +10,8 @@ import DatasetTableEditor from "../components/DatasetTableEditor";
 import { Empty, Field, Modal, Notice, Pill, Spinner, TextArea, TextInput, fmtDate } from "../components/ui";
 import { toast, errText } from "../components/toast";
 import { api } from "../api/client";
-import type { DatasetOption, DatasetVersion, PiiScan, QAPair } from "../types";
+import { takeFactsDraft } from "../lib/factsDraft";
+import type { FactsDraft, DatasetOption, DatasetVersion, PiiScan, QAPair } from "../types";
 
 const PII_LABEL: Record<string, string> = { cid: "เลขบัตรประชาชน", hn: "เลข HN", phone: "เบอร์โทร", email: "อีเมล", name: "ชื่อ-นามสกุล (อาจใช่)" };
 
@@ -18,7 +19,9 @@ export default function Datasets() {
   const [items, setItems] = useState<DatasetOption[] | null>(null);
   const [creating, setCreating] = useState(false);
   const [fromKb, setFromKb] = useState(false);
-  const [facts, setFacts] = useState(false);
+  // ถ้ามีร่างจากหน้าทดสอบ (ข้อที่พลาด) ให้เปิดตารางข้อเท็จจริงพร้อมร่างทันที
+  const [draft, setDraft] = useState<FactsDraft | null>(() => takeFactsDraft());
+  const [facts, setFacts] = useState(() => !!draft);
   const [detail, setDetail] = useState<DatasetOption | null>(null);
 
   const load = useCallback(() => {
@@ -57,7 +60,7 @@ export default function Datasets() {
       </div>
 
       {creating && <CustomDatasetDialog onClose={() => setCreating(false)} onSaved={() => { setCreating(false); load(); }} />}
-      {facts && <FactsBuilderDialog onClose={() => setFacts(false)} onDone={() => { setFacts(false); load(); }} />}
+      {facts && <FactsBuilderDialog draft={draft} onClose={() => { setFacts(false); setDraft(null); }} onDone={() => { setFacts(false); setDraft(null); load(); }} />}
       {fromKb && <FromKbDialog onClose={() => setFromKb(false)} onDone={() => { setFromKb(false); load(); }} />}
       {detail && <DetailDialog ds={detail} onClose={() => setDetail(null)} />}
     </div>

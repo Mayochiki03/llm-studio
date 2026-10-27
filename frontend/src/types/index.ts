@@ -292,11 +292,19 @@ export interface CompareAnswer {
   violated: string[];
   total_s?: number | null;
   tokens_per_s?: number | null;
+  guard?: string | null;       // ด่านขอบเขตที่ตอบแทนโมเดล (ถ้ามี)
+  sources?: string[] | null;   // ชื่อเอกสารที่ดึงมา (โหมดมีคลังความรู้)
+}
+
+export interface CompareRow {
+  prompt_id: string; prompt_text?: string; red_flag?: boolean; category?: string;
+  expect?: string[]; must_not?: string[]; answers: Record<string, CompareAnswer>;
 }
 
 export interface CompareResult {
   models: string[];
-  rows: { prompt_id: string; prompt_text?: string; red_flag?: boolean; answers: Record<string, CompareAnswer> }[];
+  use_kb?: boolean;
+  rows: CompareRow[];
   summaries: Record<string, { pass_rate: number | null; red_flag_recall: number | null; avg_latency_s: number | null; avg_tokens_per_s: number | null; count: number }>;
   run_ids: Record<string, string>;
 }
@@ -404,4 +412,33 @@ export interface ModelCard {
   };
   events: { id: number; ts: number; event: string; detail: string }[];
   retrain: null | Record<string, unknown>;
+  headline?: string;
+  badges?: { tone: "good" | "warn" | "bad" | "info"; text: string }[];
+  loss_curve?: { step: number | null; train: number | null; val: number | null }[];
+}
+
+/** งานเปรียบเทียบเบื้องหลัง (0.8.4) */
+export interface CompareJob {
+  id: string;
+  status: "running" | "done" | "error" | "cancelled" | "interrupted";
+  created_at: number;
+  finished_at: number | null;
+  models: string[];
+  use_kb: boolean;
+  n_prompts: number;
+  error: string | null;
+  progress: { model: string; model_index: number; models_total: number; done: number; total: number } | null;
+  result?: CompareResult | null;
+  summaries?: CompareResult["summaries"] | null;
+}
+
+export interface CompareAnalysis {
+  models: Record<string, { failed: number; groups: { kind: string; label: string; advice: string; count: number; prompt_ids: string[] }[] }>;
+  differences: { prompt_id: string; text: string; winner: string }[];
+}
+
+export interface FactsDraft {
+  facts: { topic: string; questions: string[]; answer: string; keywords: string[]; kind: string }[];
+  oos: string[];
+  note: string;
 }

@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import Topbar from "../components/Topbar";
 import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
-import { api } from "../api/client";
+import { api, downloadFile } from "../api/client";
 import type { EvalPrompt, EvalRun, LeaderboardRow, OllamaModel } from "../types";
-import { Star, Trash2, Plus, Play, Trophy, Pencil, Pin, Siren, CheckCircle2, XCircle } from "lucide-react";
+import { Star, Trash2, Plus, Play, Trophy, Pencil, Pin, Siren, CheckCircle2, XCircle, Download } from "lucide-react";
 import EvalCompare from "../components/EvalCompare";
 import PromptEditor from "../components/PromptEditor";
 import { Pill } from "../components/ui";
@@ -31,8 +31,16 @@ export default function Eval() {
     }).catch(() => {});
   }
 
+  // จำรอบทดสอบที่เปิดดูอยู่ ให้เปลี่ยนหน้าแล้วกลับมายังเห็น (ผลทุกรอบอยู่ใน backend อยู่แล้ว)
+  const LAST_RUN_KEY = "llmstudio.eval.lastRun";
   function loadRuns() {
-    api.evalRuns().then(setRuns).catch(() => {});
+    api.evalRuns().then((rs) => {
+      setRuns(rs);
+      try {
+        const id = localStorage.getItem(LAST_RUN_KEY);
+        if (id) setActiveRun((cur) => cur ?? rs.find((r) => r.id === id) ?? null);
+      } catch { /* ข้าม */ }
+    }).catch(() => {});
     api.leaderboard().then(setLeaderboard).catch(() => {});
   }
 
@@ -72,6 +80,7 @@ export default function Eval() {
     try {
       const run = await api.runEval(selectedModel, Array.from(selectedPromptIds), useKb);
       setActiveRun(run);
+      try { localStorage.setItem(LAST_RUN_KEY, run.id); } catch { /* ข้าม */ }
       loadRuns();
     } catch (e) {
       toast(errText(e), "bad");
@@ -187,6 +196,14 @@ export default function Eval() {
           <Card>
             <CardHeader title={`ผลทดสอบ · ${activeRun.model}`} subtitle="ให้คะแนนแต่ละคำตอบ 1-5 ดาว" />
             <div className="px-5 pb-5 space-y-3">
+              <div className="flex flex-wrap gap-2 justify-end">
+                {(["csv", "json"] as const).map((f) => (
+                  <Button key={f} variant="secondary" className="text-xs py-1.5"
+                    onClick={() => downloadFile(`/eval/runs/${activeRun.id}/export?format=${f}`, `eval-${activeRun.id}.${f}`).catch((e) => toast(errText(e), "bad"))}>
+                    <Download size={13} /> {f === "csv" ? "CSV (Excel)" : "JSON"}
+                  </Button>
+                ))}
+              </div>
               {activeRun.results.map((r) => (
                 <div key={r.id} className="border border-base-800 rounded-lg p-3.5">
                   <div className="flex items-start justify-between gap-2 mb-1.5">

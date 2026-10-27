@@ -1,39 +1,100 @@
-// เปรียบเทียบหลายโมเดลด้วยชุดโจทย์เดียวกัน: ตารางสรุป + คำตอบเรียงข้างกัน (รันทีละโมเดลเพื่อไม่ให้ VRAM เต็ม)
-import { useState } from "react";
-import { GitCompare, CheckCircle2, XCircle, Siren } from "lucide-react";
+// เปรียบเทียบหลายโมเดลด้วยชุดโจทย์เดียวกัน (0.8.4): รันเป็นงานเบื้องหลังที่ backend
+// กดแล้วเปลี่ยนหน้า/ปิดเบราว์เซอร์ได้ กลับมาจะต่อจากเดิมอัตโนมัติ (จำเลขงานและตัวเลือกไว้ใน localStorage) และดูย้อนหลังได้จากรายการประวัติ
+import { useCallback, useEffect, useRef, useState } from "react";
+import { GitCompare, Square, History, Eye } from "lucide-react";
 import { Card, CardHeader } from "./Card";
 import Button from "./Button";
-import { Pill, pct } from "./ui";
+import CompareResultView from "./CompareResultView";
+import { Notice, Pill, fmtDate } from "./ui";
 import { toast, errText } from "./toast";
 import { api } from "../api/client";
-import type { CompareResult } from "../types";
+import type { CompareJob } from "../types";
+
+const KEY = "llmstudio.compare.v1";
+interface Saved { picked: string[]; pinnedOnly: boolean; useKb: boolean; jobId: string }
+
+function loadSaved(): Saved {
+  try {
+    const s = JSON.parse(localStorage.getItem(KEY) ?? "null");
+    if (s && Array.isArray(s.picked)) return { picked: s.picked, pinnedOnly: s.pinnedOnly !== false, useKb: !!s.useKb, jobId: String(s.jobId ?? "") };
+  } catch { /* ไม่มีที่เก็บ/ข้อมูลเสีย ใช้ค่าเริ่มต้น */ }
+  return { picked: [], pinnedOnly: true, useKb: false, jobId: "" };
+}
+
+const STATUS: Record<string, { label: string; tone: "good" | "warn" | "bad" | "info" | "mute" }> = {
+  running: { label: "กำลังรัน", tone: "info" }, done: { label: "เสร็จ", tone: "good" }, error: { label: "ผิดพลาด", tone: "bad" },
+  cancelled: { label: "หยุดแล้ว", tone: "warn" }, interrupted: { label: "ถูกตัดกลางทาง", tone: "warn" },
+};
+
+/** ข้อความความคืบหน้าอ่านง่าย */
+export function progressText(j: Pick<CompareJob, "progress">): string {
+  const p = j.progress;
+  if (!p) return "";
+  return `โมเดลที่ ${p.model_index + 1}/${p.models_total} (${p.model}) · ข้อ ${p.done}/${p.total}`;
+}
 
 export default function EvalCompare({ models, selectedPromptIds }: { models: string[]; selectedPromptIds: Set<string> }) {
-  const [picked, setPicked] = useState<Set<string>>(new Set());
-  const [pinnedOnly, setPinnedOnly] = useState(true);
-  const [useKb, setUseKb] = useState(false); // ทดสอบแบบมีคลังความรู้ + ขอบเขต เหมือนใช้งานจริง
-  const [busy, setBusy] = useState(false);
-  const [res, setRes] = useState<CompareResult | null>(null);
+  const init = useRef(loadSaved()).current;
+  const [picked, setPicked] = useState<Set<string>>(new Set(init.picked));
+  const [pinnedOnly, setPinnedOnly] = useState(init.pinnedOnly);
+  const [useKb, setUseKb] = useState(init.useKb);
+  const [jobId, setJobId] = useState(init.jobId);
+  const [job, setJob] = useState<CompareJob | null>(null);
+  const [history, setHistory] = useState<CompareJob[]>([]);
+  const [starting, setStarting] = useState(false);
+
+  // จำตัวเลือก + งานล่าสุด ให้กลับมาหน้านี้แล้วอยู่ที่เดิม
+  useEffect(() => {
+    try { localStorage.setItem(KEY, JSON.stringify({ picked: Array.from(picked), pinnedOnly, useKb, jobId })); } catch { /* ข้าม */ }
+  }, [picked, pinnedOnly, useKb, jobId]);
+
+  const loadHistory = useCallback(() => { api.compareJobs().then((h) => setHistory(h.slice(0, 8))).catch(() => {}); }, []);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  // เปิดหน้ามาแล้วมีงานค้างอยู่ → โหลดและติดตามต่อ; ระหว่างรันถามความคืบหน้าทุก 2 วินาที
+  useEffect(() => {
+    if (!jobId) { setJob(null); return; }
+    let stop = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      try {
+        const j = await api.compareJob(jobId);
+        if (stop) return;
+        setJob(j);
+        if (j.status === "running") timer = setTimeout(tick, 2000);
+        else loadHistory();
+      } catch {
+        if (!stop) { setJob(null); setJobId(""); }   // งานถูกลบ/ไม่พบ
+      }
+    };
+    tick();
+    return () => { stop = true; if (timer) clearTimeout(timer); };
+  }, [jobId, loadHistory]);
 
   const toggle = (m: string) =>
-    setPicked((p) => {
-      const n = new Set(p);
-      n.has(m) ? n.delete(m) : n.add(m);
-      return n;
-    });
+    setPicked((p) => { const n = new Set(p); n.has(m) ? n.delete(m) : n.add(m); return n; });
 
   async function run() {
-    setBusy(true);
-    setRes(null);
+    setStarting(true);
     try {
       // pinnedOnly = ใช้เฉพาะโจทย์ที่ตรึง/red flag; ปิด = ใช้โจทย์ที่ติ๊กเลือกไว้ด้านบน
-      setRes(await api.compare(Array.from(picked), pinnedOnly, pinnedOnly ? [] : Array.from(selectedPromptIds), useKb));
+      const r = await api.compareStart(Array.from(picked), pinnedOnly, pinnedOnly ? [] : Array.from(selectedPromptIds), useKb);
+      setJob(null);
+      setJobId(r.id);
+      toast("เริ่มเปรียบเทียบแล้ว เปลี่ยนหน้าได้ ผลจะรออยู่ที่นี่");
     } catch (e) {
       toast(errText(e), "bad");
     } finally {
-      setBusy(false);
+      setStarting(false);
     }
   }
+  async function stop() {
+    if (!jobId) return;
+    try { await api.compareCancel(jobId); toast("สั่งหยุดแล้ว (หยุดหลังข้อที่กำลังตอบ)"); } catch (e) { toast(errText(e), "bad"); }
+  }
+
+  const running = job?.status === "running";
+  const pct = job?.progress ? Math.round(((job.progress.model_index * job.progress.total + job.progress.done) / Math.max(1, job.progress.models_total * job.progress.total)) * 100) : 0;
 
   return (
     <Card>
@@ -56,66 +117,40 @@ export default function EvalCompare({ models, selectedPromptIds }: { models: str
           <input type="checkbox" className="accent-accent-500" checked={useKb} onChange={(e) => setUseKb(e.target.checked)} />
           ทดสอบแบบมีคลังความรู้และขอบเขต (เหมือนใช้งานจริง) — วัดผลที่ผู้ใช้เห็นจริง ไม่ใช่แค่ความจำของโมเดล
         </label>
-        <Button onClick={run} disabled={busy || picked.size < 2}>
-          <GitCompare size={15} /> {busy ? "กำลังเปรียบเทียบ (อาจใช้เวลาหลายนาที)..." : `เปรียบเทียบ ${picked.size} โมเดล`}
-        </Button>
-        {picked.size < 2 && <p className="text-[11px] text-base-500">เลือกอย่างน้อย 2 โมเดล</p>}
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={run} disabled={starting || running || picked.size < 2}>
+            <GitCompare size={15} /> {running ? "กำลังเปรียบเทียบ..." : `เปรียบเทียบ ${picked.size} โมเดล`}
+          </Button>
+          {running && <Button variant="secondary" onClick={stop}><Square size={14} /> หยุด</Button>}
+        </div>
+        {picked.size < 2 && !running && <p className="text-[11px] text-base-500">เลือกอย่างน้อย 2 โมเดล</p>}
 
-        {res && (
-          <div className="space-y-4">
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="text-left text-base-400 border-b border-base-800">
-                    <th className="py-2 pr-3 font-medium">โมเดล</th>
-                    <th className="py-2 pr-3 font-medium">ผ่านเกณฑ์</th>
-                    <th className="py-2 pr-3 font-medium">จับ red flag</th>
-                    <th className="py-2 pr-3 font-medium">เวลาตอบ</th>
-                    <th className="py-2 font-medium">ความเร็ว</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {res.models.map((m) => {
-                    const s = res.summaries[m];
-                    return (
-                      <tr key={m} className="border-b border-base-800 last:border-0">
-                        <td className="py-2 pr-3 text-base-100 break-all">{m}</td>
-                        <td className="py-2 pr-3">{pct(s?.pass_rate)}</td>
-                        <td className="py-2 pr-3">{pct(s?.red_flag_recall)}</td>
-                        <td className="py-2 pr-3">{s?.avg_latency_s ? `${s.avg_latency_s} วิ` : "-"}</td>
-                        <td className="py-2">{s?.avg_tokens_per_s ? `${s.avg_tokens_per_s} tok/s` : "-"}</td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
+        {job && running && (
+          <div className="space-y-1.5">
+            <div className="h-2 rounded-full bg-base-800 overflow-hidden"><div className="h-full bg-accent-500 transition-all" style={{ width: `${pct}%` }} /></div>
+            <div className="text-xs text-base-300">{progressText(job)} ({pct}%) · เปลี่ยนหน้าได้ งานรันต่อที่ backend</div>
+          </div>
+        )}
+        {job && job.status === "error" && <Notice tone="bad">เปรียบเทียบผิดพลาด: {job.error}{job.result ? " (แสดงผลบางส่วนด้านล่าง)" : ""}</Notice>}
+        {job && job.status === "interrupted" && <Notice tone="warn">งานนี้ถูกตัดกลางทางเพราะ backend ถูกปิด ผลที่ทำเสร็จก่อนหน้าอยู่ในประวัติการทดสอบของแต่ละโมเดล รันใหม่ได้</Notice>}
+        {job && job.status === "cancelled" && <Notice tone="warn">หยุดกลางทาง แสดงเฉพาะข้อที่ทำเสร็จแล้ว</Notice>}
+
+        {job?.result && <CompareResultView jobId={job.id} res={job.result} />}
+
+        {history.length > 0 && (
+          <div className="pt-2 border-t border-base-800">
+            <div className="flex items-center gap-1.5 text-xs text-base-400 mb-2"><History size={13} /> ประวัติการเปรียบเทียบล่าสุด</div>
+            <div className="space-y-1.5">
+              {history.map((h) => (
+                <div key={h.id} className={`flex items-center gap-2 text-xs rounded-lg px-3 py-2 ${h.id === jobId ? "bg-base-800" : "bg-base-900/60"}`}>
+                  <span className="text-base-500 shrink-0">{fmtDate(h.created_at)}</span>
+                  <span className="text-base-200 truncate">{h.models.join(" vs ")}</span>
+                  <span className="text-base-500 shrink-0">{h.n_prompts} ข้อ{h.use_kb ? " · มีคลัง" : ""}</span>
+                  <span className="ml-auto shrink-0"><Pill tone={STATUS[h.status]?.tone ?? "mute"}>{STATUS[h.status]?.label ?? h.status}</Pill></span>
+                  <button className="shrink-0 text-base-400 hover:text-base-100" title="เปิดดู" onClick={() => setJobId(h.id)}><Eye size={14} /></button>
+                </div>
+              ))}
             </div>
-
-            {res.rows.map((row) => (
-              <div key={row.prompt_id} className="border border-base-800 rounded-lg p-3.5 space-y-2">
-                <div className="flex items-center gap-2 text-sm">
-                  {row.red_flag && <Siren size={14} className="text-bad shrink-0" />}
-                  <span className="text-base-100">{row.prompt_text}</span>
-                </div>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                  {res.models.map((m) => {
-                    const a = row.answers[m];
-                    if (!a) return null;
-                    return (
-                      <div key={m} className="bg-base-850 rounded-lg p-3 space-y-1.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="text-[11px] text-base-400 break-all">{m}</span>
-                          {a.passed === null ? <Pill>ไม่มีเกณฑ์</Pill> : a.passed ? <Pill tone="good"><CheckCircle2 size={11} className="mr-1" />ผ่าน</Pill> : <Pill tone="bad"><XCircle size={11} className="mr-1" />ไม่ผ่าน</Pill>}
-                        </div>
-                        <div className="text-xs text-base-200 whitespace-pre-wrap">{a.response}</div>
-                        {a.missing.length > 0 && <div className="text-[11px] text-bad">ขาด: {a.missing.join(", ")}</div>}
-                        {a.violated.length > 0 && <div className="text-[11px] text-bad">มีสิ่งที่ห้ามมี: {a.violated.join(", ")}</div>}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            ))}
           </div>
         )}
       </div>

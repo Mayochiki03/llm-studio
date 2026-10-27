@@ -20,6 +20,7 @@ PROMPTS_FILE = DATA_DIR / "eval_prompts.json"
 # id ของโจทย์ตั้งต้นที่ผู้ใช้ลบทิ้งแล้ว (กันไม่ให้ระบบเติมกลับมาเองทุกครั้งที่เปิดหน้า)
 REMOVED_SEEDS_FILE = DATA_DIR / "eval_prompts_removed.json"
 RUNS_FILE = DATA_DIR / "eval_runs.json"
+COMPARES_FILE = DATA_DIR / "eval_compares.json"   # งานเปรียบเทียบเบื้องหลัง (compare_jobs.py)
 
 DEFAULT_MODELS = [
     {

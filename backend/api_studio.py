@@ -20,9 +20,11 @@ from pydantic import BaseModel
 
 import apikeys
 import auth
+import compare_jobs
 import config
 import datasets_mgr
 import db
+import evalreport
 import evalx
 import guard
 import hardware
@@ -837,7 +839,7 @@ async def _ask_like_production(model: str, text: str, system: str, context: str 
     return r
 
 
-async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> dict:
+async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False, progress=None, cancelled=None) -> dict:
     """รันโจทย์ชุดหนึ่งกับโมเดลหนึ่ง พร้อมตรวจเงื่อนไขอัตโนมัติและวัดเวลา/ความเร็ว แล้วบันทึกเป็นรอบทดสอบ
     use_kb=True (0.8.2) = ทดสอบแบบมีคลังความรู้และด่านขอบเขตเหมือนใช้งานจริง (วัดผลที่ผู้ใช้เห็นจริง)"""
     system = config.get_settings()["default_system_prompt"] if use_kb else ""
@@ -845,6 +847,8 @@ async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> d
     run_id = store.new_run_id()
     results = []
     for pid in prompt_ids:
+        if cancelled and cancelled():
+            break
         prompt = all_prompts.get(pid)
         if not prompt:
             continue
@@ -861,7 +865,10 @@ async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> d
             "passed": chk["passed"], "missing": chk["missing"], "violated": chk["violated"],
             "total_s": r.get("total_s"), "tokens_per_s": r.get("tokens_per_s"),
             "guard": r.get("guard"), "sources": r.get("sources"),
+            "category": prompt.get("category", ""), "expect": prompt.get("expect", []), "must_not": prompt.get("must_not", []),
         })
+        if progress:
+            progress(len(results), len(prompt_ids))
     run = {"id": run_id, "model": model, "created_at": time.time(), "results": results, "use_kb": use_kb,
            "environment": modelcard.environment_snapshot() if use_kb else None,
            "summary": evalx.summarize(results)}
@@ -885,9 +892,27 @@ def _select_prompts(prompt_ids: list[str], pinned_only: bool) -> list[str]:
     return [p["id"] for p in prompts]
 
 
+def build_compare(models: list[str], ids: list[str], runs: dict, use_kb: bool) -> dict:
+    """รวมผลรายโมเดลเป็นตารางเทียบเคียง: หนึ่งแถวต่อคำถาม คำตอบแต่ละโมเดลอยู่ข้างกัน"""
+    rows = []
+    for pid in ids:
+        row: dict = {"prompt_id": pid, "answers": {}}
+        for m, run in runs.items():
+            res = next((r for r in run["results"] if r["prompt_id"] == pid), None)
+            if res:
+                row.update({"prompt_text": res["prompt_text"], "red_flag": res["red_flag"], "category": res.get("category", ""),
+                            "expect": res.get("expect", []), "must_not": res.get("must_not", [])})
+                row["answers"][m] = {k: res.get(k) for k in ("response", "passed", "missing", "violated", "total_s", "tokens_per_s", "guard", "sources")}
+        if row["answers"]:
+            rows.append(row)
+    return {"models": list(runs), "rows": rows,
+            "summaries": {m: r["summary"] for m, r in runs.items()},
+            "run_ids": {m: r["id"] for m, r in runs.items()}, "use_kb": use_kb}
+
+
 @router.post("/eval/compare")
 async def eval_compare(body: CompareBody):
-    """รันชุดโจทย์เดียวกันกับหลายโมเดล (ทีละโมเดล กัน VRAM ไม่พอ) แล้วจัดเป็นตารางเทียบเคียงข้างกัน"""
+    """รันชุดโจทย์เดียวกันกับหลายโมเดล (ทีละโมเดล กัน VRAM ไม่พอ) แล้วจัดเป็นตารางเทียบเคียงข้างกัน (รอจนเสร็จ)"""
     if len(body.models) < 2:
         raise HTTPException(400, "เลือกอย่างน้อย 2 โมเดลเพื่อเปรียบเทียบ")
     ids = _select_prompts(body.prompt_ids, body.pinned_only)
@@ -896,19 +921,123 @@ async def eval_compare(body: CompareBody):
     runs = {}
     for m in body.models:
         runs[m] = await run_eval(m, ids, body.use_kb)
-    rows = []
-    for pid in ids:
-        row: dict = {"prompt_id": pid, "answers": {}}
-        for m, run in runs.items():
-            res = next((r for r in run["results"] if r["prompt_id"] == pid), None)
-            if res:
-                row["prompt_text"] = res["prompt_text"]
-                row["red_flag"] = res["red_flag"]
-                row["answers"][m] = {k: res[k] for k in ("response", "passed", "missing", "violated", "total_s", "tokens_per_s")}
-        rows.append(row)
-    return {"models": body.models, "rows": rows,
-            "summaries": {m: r["summary"] for m, r in runs.items()},
-            "run_ids": {m: r["id"] for m, r in runs.items()}, "use_kb": body.use_kb}
+    return build_compare(body.models, ids, runs, body.use_kb)
+
+
+async def _compare_runner(model, ids, use_kb, progress, cancelled):
+    return await run_eval(model, ids, use_kb, progress, cancelled)
+
+
+@router.post("/eval/compare/start")
+async def eval_compare_start(body: CompareBody):
+    """เริ่มเปรียบเทียบเป็นงานเบื้องหลัง: คืนเลขงานทันที ติดตามที่ GET /eval/compare/jobs/{id} (เปลี่ยนหน้า/ปิดเบราว์เซอร์ได้)"""
+    if len(body.models) < 2:
+        raise HTTPException(400, "เลือกอย่างน้อย 2 โมเดลเพื่อเปรียบเทียบ")
+    ids = _select_prompts(body.prompt_ids, body.pinned_only)
+    if not ids:
+        raise HTTPException(400, "ยังไม่มีโจทย์ให้ทดสอบ")
+    if any(j["status"] == "running" for j in compare_jobs.list_jobs()):
+        raise HTTPException(409, "มีงานเปรียบเทียบที่กำลังรันอยู่ รอให้เสร็จหรือกดหยุดก่อน (รันพร้อมกันจะแย่ง VRAM)")
+    job = compare_jobs.start(body.models, ids, body.use_kb, _compare_runner, build_compare)
+    db.audit("eval.compare", ",".join(body.models), f"job={job['id']} prompts={len(ids)} kb={body.use_kb}")
+    return {"id": job["id"], "status": job["status"]}
+
+
+@router.get("/eval/compare/jobs")
+def eval_compare_jobs():
+    return compare_jobs.list_jobs()
+
+
+@router.get("/eval/compare/jobs/{job_id}")
+def eval_compare_job(job_id: str):
+    j = compare_jobs.get(job_id)
+    if not j:
+        raise HTTPException(404, "ไม่พบงานเปรียบเทียบนี้")
+    return j
+
+
+@router.post("/eval/compare/jobs/{job_id}/cancel")
+def eval_compare_cancel(job_id: str):
+    if not compare_jobs.cancel(job_id):
+        raise HTTPException(409, "งานนี้ไม่ได้กำลังรันอยู่")
+    return {"ok": True}
+
+
+@router.get("/eval/compare/jobs/{job_id}/analysis")
+def eval_compare_analysis(job_id: str):
+    """วิเคราะห์ว่าพลาดเพราะอะไร จัดกลุ่ม + คำแนะนำ + ข้อที่สองโมเดลต่างกัน (กฎในเครื่อง ไม่ใช้ AI)"""
+    j = compare_jobs.get(job_id)
+    if not j or not j.get("result"):
+        raise HTTPException(404, "ยังไม่มีผลให้วิเคราะห์")
+    return evalreport.analyze(j["result"])
+
+
+@router.get("/eval/compare/jobs/{job_id}/export")
+def eval_compare_export(job_id: str, format: str = "csv"):
+    """ส่งออกผล: csv (เปิดใน Excel) | json (ครบทุกอย่างรวมวิเคราะห์) | failed (ข้อความเฉพาะข้อที่พลาด)"""
+    j = compare_jobs.get(job_id)
+    if not j or not j.get("result"):
+        raise HTTPException(404, "ยังไม่มีผลให้ส่งออก")
+    return _export_response(j["result"], format, f"compare-{job_id}")
+
+
+def _export_response(result: dict, fmt: str, stem: str):
+    from fastapi.responses import Response
+    if fmt == "csv":
+        return Response(evalreport.to_csv(result), media_type="text/csv; charset=utf-8",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'})
+    if fmt == "json":
+        return Response(evalreport.to_json(result), media_type="application/json",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.json"'})
+    if fmt == "failed":
+        return PlainTextResponse(evalreport.failed_text(result))
+    raise HTTPException(400, "format ต้องเป็น csv, json หรือ failed")
+
+
+@router.get("/eval/runs/{run_id}/export")
+def eval_run_export(run_id: str, format: str = "csv"):
+    """ส่งออกผลรอบเดี่ยว (รูปแบบเดียวกับผลเปรียบเทียบ)"""
+    run = store.get_run(run_id)
+    if not run:
+        raise HTTPException(404, "ไม่พบรอบทดสอบนี้")
+    return _export_response(evalreport.run_to_result(run), format, f"eval-{run_id}")
+
+
+class DraftBody(BaseModel):
+    model: str
+    limit: int = 12
+
+
+@router.post("/eval/compare/jobs/{job_id}/drafts")
+async def eval_compare_drafts(job_id: str, body: DraftBody):
+    """ร่างข้อมูลสอนจากข้อที่โมเดลหนึ่งพลาด (ยังไม่บันทึกอะไร): ข้อเท็จจริง = คำถาม + คำสำคัญ + คำตอบที่คาดจากคลังความรู้ (ถ้าหาเจอ),
+    นอกขอบเขต = รายการคำถามให้ตอบ 'ไม่มีข้อมูล' เหลือให้ผู้ใช้ตรวจ/เติมคำตอบก่อนนำเข้าตารางข้อเท็จจริง"""
+    j = compare_jobs.get(job_id)
+    if not j or not j.get("result"):
+        raise HTTPException(404, "ยังไม่มีผลให้ใช้")
+    facts: list[dict] = []
+    oos: list[str] = []
+    for row in j["result"]["rows"]:
+        a = (row.get("answers") or {}).get(body.model)
+        kind = evalreport.classify(row, a) if a else None
+        if not kind or kind in ("error", "red_flag_miss"):   # red flag ต้องแก้ที่กฎขอบเขต/ให้คนเขียนเอง ไม่ร่างอัตโนมัติ
+            continue
+        if kind == "hallucination":
+            oos.append(row["prompt_text"])
+            continue
+        if len(facts) >= body.limit:
+            continue
+        answer = ""
+        try:
+            hits = (await kb.search(row["prompt_text"], 1)).get("hits", [])
+            if hits and hits[0]["score"] >= 0.35:
+                answer = re.sub(r"^.*?คำตอบ:\s*", "", hits[0]["text"], flags=re.S).strip()
+        except Exception:  # noqa: BLE001 - ค้นไม่ได้ก็ปล่อยว่างให้ผู้ใช้เติม
+            pass
+        facts.append({"topic": row.get("category") or "ทั่วไป", "questions": [row["prompt_text"]], "answer": answer,
+                      "keywords": [k for k in (row.get("expect") or []) if "|" not in k], "kind": kind})
+    return {"facts": facts, "oos": oos,
+            "note": "ข้อสอบที่ถูกนำไปสอนจะไม่ใช่ข้อสอบที่ยุติธรรมอีกต่อไป ควรเขียนข้อสอบใหม่ที่ใช้สำนวนต่างออกไปมาแทน"}
 
 
 @router.get("/registry/{vid}/card")
@@ -931,7 +1060,7 @@ async def registry_eval(vid: str, prompt_ids: list[str] | None = None, use_kb: b
         raise HTTPException(400, "ยังไม่มีโจทย์ที่ตรึงไว้ ไปตรึงโจทย์ในหน้าทดสอบก่อน")
     run = await run_eval(v["name"], ids, use_kb)
     summary = {**run["summary"], "run_id": run["id"], "at": run["created_at"], "use_kb": run.get("use_kb", False),
-               "n_prompts": len(run["results"])}
+               "n_prompts": len(run["results"]), "environment": run.get("environment")}
     return registry.attach_eval(vid, summary)
 
 
