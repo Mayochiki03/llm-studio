@@ -48,7 +48,7 @@ from jobs import PROJECT_ROOT, _subprocess_env, manager, pump_process
 load_dotenv(Path(__file__).parent / ".env")  # ไม่บังคับ: GEMINI_API_KEY=... เก็บไว้ที่นี่
 
 HF_API = "https://huggingface.co/api"
-APP_VERSION = "0.8.4"
+APP_VERSION = "0.8.5"
 
 
 async def _auto_backup_loop():

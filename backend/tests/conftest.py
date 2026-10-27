@@ -24,6 +24,15 @@ def _fake_vec(text: str, dim: int = 32) -> list[float]:
 
 
 @pytest.fixture(autouse=True)
+def clean_abuse():
+    """ล้างสถานะตัวกันถามซ้ำก่อนทุกเทสต์ (เป็นตัวแปรระดับโมดูล ไม่ให้ข้ามเทสต์)"""
+    import abuse
+    abuse.reset()
+    yield
+    abuse.reset()
+
+
+@pytest.fixture(autouse=True)
 def fake_ollama(monkeypatch):
     import ollama_client
 

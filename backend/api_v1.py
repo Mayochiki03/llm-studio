@@ -12,6 +12,7 @@ import time
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
+import abuse
 import apikeys
 import config
 import db
@@ -50,6 +51,7 @@ class AskBody(BaseModel):
     use_kb: bool = True
     top_k: int | None = None
     temperature: float | None = None
+    client_id: str = ""       # รหัสผู้ใช้ปลายทาง (เช่น เลขเครื่อง/เซสชัน) ไว้แยกคนที่ใช้คีย์เดียวกัน เพื่อจำกัดการถามซ้ำรายคน
 
 
 def _snippet(text: str, n: int = 240) -> str:
@@ -96,6 +98,20 @@ async def ask(body: AskBody, key: dict = Depends(require_key)):
         db.audit("api.ask.guard", key["name"], f"{rule['kind']}:{rule['rule_id']} q_len={len(q)}", actor=f"key:{key['name']}")
         return {"answer": rule["reply"], "model": None, "mode": "guard", "elapsed_s": 0.0, "sources": [],
                 "guard": {"kind": rule["kind"], "rule": rule["rule_id"]}}
+    # ด่านกันถามซ้ำ/สแปม (หลังด่านกฎ จึงไม่จำกัดเคสอันตราย)
+    client = f"key:{key['id']}" + (f":{body.client_id[:64]}" if body.client_id else "")
+    lim = abuse.check(client, q)
+    if lim["action"] == "block":
+        db.audit("api.ask.abuse", key["name"], f"block:{lim['reason']} n={lim['count']} q_len={len(q)}", actor=f"key:{key['name']}")
+        raise HTTPException(429, detail={"code": "cooldown" if lim["reason"] == "cooldown" else lim["reason"], "message": lim["reply"],
+                                         "retry_after": lim["retry_after"]}, headers={"Retry-After": str(max(1, lim["retry_after"]))})
+    if lim["action"] == "warn":
+        db.audit("api.ask.abuse", key["name"], f"warn n={lim['count']} q_len={len(q)}", actor=f"key:{key['name']}")
+        return {"answer": lim["reply"], "model": None, "mode": "abuse", "elapsed_s": 0.0, "sources": [],
+                "guard": {"kind": "repeat_warn", "rule": "abuse", "count": lim["count"]}}
+    if lim["action"] == "cached":
+        return {"answer": lim["reply"], "model": None, "mode": "cache", "elapsed_s": 0.0, "sources": [],
+                "guard": {"kind": "repeat_cached", "rule": "abuse", "count": lim["count"]}}
     system = config.get_settings()["default_system_prompt"]
     hits: list[dict] = []
     mode = "off"
@@ -122,8 +138,19 @@ async def ask(body: AskBody, key: dict = Depends(require_key)):
     if "error" in r:
         db.audit("api.ask.error", key["name"], r["error"][:300], actor=f"key:{key['name']}")
         raise HTTPException(502, f"โมเดลตอบไม่ได้: {r['error']}")
+    answer, guard_info = r["reply"], None
+    bad = guard.verify_numbers(answer, [h["text"] for h in hits]) if body.use_kb else None   # แก้เลขที่โมเดลแต่งเอง
+    if bad:
+        db.audit("api.ask.guard", key["name"], f"unverified_number {','.join(bad['numbers'])[:80]} q_len={len(q)}", actor=f"key:{key['name']}")
+        answer, guard_info = bad["reply"], {"kind": bad["kind"], "rule": bad["rule_id"], "numbers": bad["numbers"]}
+    else:
+        if not body.history:
+            abuse.cache_put(q, answer, mode)                    # จำคำตอบปกติไว้ใช้ตอนถูกถามซ้ำ (ไม่จำคำตอบที่ถูกแก้)
     db.audit("api.ask", key["name"], f"q_len={len(q)} hits={len(hits)} model={act['name']}", actor=f"key:{key['name']}")
-    return {
-        "answer": r["reply"], "model": act["name"], "mode": mode, "elapsed_s": round(time.time() - t0, 2),
+    out = {
+        "answer": answer, "model": act["name"], "mode": mode, "elapsed_s": round(time.time() - t0, 2),
         "sources": [{"doc_id": h["doc_id"], "title": h["title"], "score": h["score"], "snippet": _snippet(h["text"])} for h in hits],
     }
+    if guard_info:
+        out["guard"] = guard_info
+    return out

@@ -99,7 +99,7 @@ def to_csv(result: dict) -> str:
     models = result.get("models", [])
     head = ["คำถาม", "กลุ่ม", "red_flag", "คำที่ต้องมี", "คำที่ห้ามมี"]
     for m in models:
-        head += [f"{m} | คำตอบ", f"{m} | ผล", f"{m} | ขาด", f"{m} | ห้ามแต่มี", f"{m} | ด่านขอบเขต", f"{m} | เอกสารที่ดึง", f"{m} | เวลา(วิ)", f"{m} | กลุ่มที่พลาด"]
+        head += [f"{m} | คำตอบ", f"{m} | ผล", f"{m} | ขาด", f"{m} | ห้ามแต่มี", f"{m} | ด่านขอบเขต", f"{m} | เอกสารที่ดึง", f"{m} | คะแนนค้นสูงสุด", f"{m} | คำตอบเดิมก่อนแก้เลข", f"{m} | เวลา(วิ)", f"{m} | กลุ่มที่พลาด"]
     out = io.StringIO()
     out.write("﻿")
     w = csv.writer(out)
@@ -110,7 +110,7 @@ def to_csv(result: dict) -> str:
             a = (row.get("answers") or {}).get(m) or {}
             k = classify(row, a) if a else None
             line += [a.get("response", ""), {True: "ผ่าน", False: "ไม่ผ่าน", None: "ไม่มีเกณฑ์"}.get(a.get("passed")), _cell(a.get("missing")),
-                     _cell(a.get("violated")), a.get("guard") or "", _cell(a.get("sources")), a.get("total_s") or "", KINDS[k][0] if k else ""]
+                     _cell(a.get("violated")), a.get("guard") or "", _cell(a.get("sources")), a.get("top_score") if a.get("top_score") is not None else "", a.get("reply_original") or "", a.get("total_s") or "", KINDS[k][0] if k else ""]
         w.writerow(line)
     w.writerow([])
     w.writerow(["สรุป", "โมเดล", "ผ่านเกณฑ์", "จับ red flag", "เวลาเฉลี่ย(วิ)", "ความเร็ว(tok/s)"])
@@ -162,5 +162,5 @@ def run_to_result(run: dict) -> dict:
     for r in run.get("results", []):
         rows.append({"prompt_id": r.get("prompt_id"), "prompt_text": r.get("prompt_text"), "category": r.get("category", ""),
                      "red_flag": r.get("red_flag"), "expect": r.get("expect", []), "must_not": r.get("must_not", []),
-                     "answers": {m: {k: r.get(k) for k in ("response", "passed", "missing", "violated", "guard", "sources", "total_s", "tokens_per_s")}}})
+                     "answers": {m: {k: r.get(k) for k in ("response", "passed", "missing", "violated", "guard", "sources", "top_score", "reply_original", "total_s", "tokens_per_s")}}})
     return {"models": [m], "rows": rows, "summaries": {m: run.get("summary", {})}, "use_kb": run.get("use_kb", False)}

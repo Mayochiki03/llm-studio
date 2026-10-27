@@ -32,7 +32,7 @@ export const navGroups: { title: string; items: NavItem[] }[] = [
     title: "3 นำไปใช้งาน",
     items: [
       { to: "/registry", label: "โมเดล", icon: Boxes, match: ["/registry", "/models", "/import"] },
-      { to: "/scope", label: "ขอบเขตและการเชื่อมต่อ", icon: ShieldCheck, match: ["/scope", "/connect"] },
+      { to: "/scope", label: "ขอบเขตและการเชื่อมต่อ", icon: ShieldCheck, match: ["/scope", "/abuse", "/connect"] },
     ],
   },
   {

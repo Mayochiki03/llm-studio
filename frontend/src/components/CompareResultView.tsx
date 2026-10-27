@@ -28,10 +28,11 @@ function AnswerBox({ m, row }: { m: string; row: CompareRow }) {
         {a.passed === null ? <Pill>ไม่มีเกณฑ์</Pill> : a.passed ? <Pill tone="good"><CheckCircle2 size={11} className="mr-1" />ผ่าน</Pill> : <Pill tone="bad"><XCircle size={11} className="mr-1" />ไม่ผ่าน</Pill>}
       </div>
       <div className="text-xs text-base-200 whitespace-pre-wrap">{a.response}</div>
-      {a.guard && <div className="text-[11px] text-accent-300 flex items-center gap-1"><ShieldCheck size={11} /> ตอบตามขอบเขต ({a.guard}) ไม่ผ่านโมเดล</div>}
+      {a.guard && <div className="text-[11px] text-accent-300 flex items-center gap-1"><ShieldCheck size={11} /> ตอบตามขอบเขต ({a.guard}){a.guard === "unverified_number" ? " แก้เลขที่ไม่ตรงเอกสาร" : " ไม่ผ่านโมเดล"}</div>}
       {a.missing.length > 0 && <div className="text-[11px] text-bad">ขาด: {a.missing.join(", ")}</div>}
       {a.violated.length > 0 && <div className="text-[11px] text-bad">มีสิ่งที่ห้ามมี: {a.violated.join(", ")}</div>}
-      {a.sources && a.sources.length > 0 && <div className="text-[11px] text-base-500 flex items-center gap-1 break-all"><BookOpen size={11} /> ดึงจาก: {a.sources.join(", ")}</div>}
+      {a.sources && a.sources.length > 0 && <div className="text-[11px] text-base-500 flex items-center gap-1 break-all"><BookOpen size={11} /> ดึงจาก: {a.sources.join(", ")}{typeof a.top_score === "number" && <span className="ml-1 text-base-400">· คะแนนสูงสุด {a.top_score}</span>}</div>}
+      {a.reply_original && <div className="text-[11px] text-warn break-words">โมเดลตอบเดิม (ถูกแก้เพราะเลขไม่ตรงเอกสาร): {a.reply_original}</div>}
     </div>
   );
 }

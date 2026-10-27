@@ -18,6 +18,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from pydantic import BaseModel
 
+import abuse
 import apikeys
 import auth
 import compare_jobs
@@ -447,6 +448,11 @@ async def playground_chat(body: PlayBody):
     search_info: dict = {}
     # ด่านขอบเขต (guard.py): กฎตอบตายตัวมาก่อน ไม่เรียกโมเดล
     decision = guard.check_rules(body.message) if body.apply_scope else None
+    acfg = abuse.get_config()
+    if body.apply_scope and not decision and acfg["enabled"] and not acfg["exempt_playground"]:   # ตัวกันถามซ้ำ (ปกติยกเว้นหน้าทดลอง)
+        lim = abuse.check("playground", body.message, cfg=acfg)
+        if lim["action"] != "allow":
+            decision = {"kind": "abuse_" + lim["action"], "rule_name": "กันถามซ้ำ/สแปม", "reply": lim["reply"]}
     if body.use_kb and not decision:
         search_info = await kb.search(body.message, body.top_k)
         hits = search_info.get("hits", [])
@@ -474,15 +480,73 @@ async def playground_chat(body: PlayBody):
     async def gen():
         yield json.dumps({"type": "sources", "hits": hits, "mode": search_info.get("mode", "off"),
                           "note": search_info.get("note", "")}, ensure_ascii=False) + "\n"
+        acc: list[str] = []
         async for ev in ollama_client.chat_stream(body.model, messages, options):
             if "delta" in ev:
+                acc.append(ev["delta"])
                 yield json.dumps({"type": "delta", "text": ev["delta"]}, ensure_ascii=False) + "\n"
             elif "error" in ev:
                 yield json.dumps({"type": "error", "error": ev["error"]}, ensure_ascii=False) + "\n"
             elif ev.get("done"):
+                # ตรวจเลขหลังตอบจบ: ถ้าแต่งเลขเอง ส่งคำสั่งแทนที่ข้อความทั้งก้อนด้วยข้อความปลอดภัย
+                bad = guard.verify_numbers("".join(acc), [h["text"] for h in hits]) if (body.apply_scope and body.use_kb) else None
+                if bad:
+                    yield json.dumps({"type": "replace", "text": bad["reply"], "guard": bad["kind"], "numbers": bad["numbers"]}, ensure_ascii=False) + "\n"
                 yield json.dumps({"type": "done", **{k: v for k, v in ev.items() if k != "done"}}, ensure_ascii=False) + "\n"
 
     return StreamingResponse(gen(), media_type="application/x-ndjson")
+
+
+# ====================================================================== กันถามซ้ำ/สแปม (0.8.5)
+class AbuseSimBody(BaseModel):
+    config: dict | None = None      # ค่าที่กำลังแก้ในหน้าจอ (ยังไม่บันทึก) ว่าง = ใช้ค่าที่บันทึก
+    question: str = "ขอเวลาทำการหน่อย"
+    repeats: int = 12
+    interval_s: float = 5.0
+
+
+class ClientBody(BaseModel):
+    client: str
+
+
+@router.get("/abuse")
+def abuse_get():
+    """ค่าตั้งปัจจุบัน + ค่าเริ่มต้น + พรีเซ็ต + สถานะสด (ใครกำลังถูกพัก, เหตุการณ์ล่าสุด, ตัวนับ)"""
+    return {"config": abuse.get_config(), "default": abuse.DEFAULT_ABUSE, "presets": abuse.PRESETS, "status": abuse.status()}
+
+
+@router.put("/abuse")
+def abuse_put(body: dict):
+    try:
+        cfg = abuse.save_config(body)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+    db.audit("abuse.update", cfg["preset"], f"enabled={cfg['enabled']} cache>{cfg['cache_after']} warn>{cfg['warn_after']} block>{cfg['block_after']}")
+    return {"config": cfg}
+
+
+@router.post("/abuse/simulate")
+def abuse_simulate(body: AbuseSimBody):
+    """จำลองถามซ้ำ N ครั้งด้วยค่าที่กำลังแก้ ไม่เรียกโมเดล ไม่แตะสถานะจริง"""
+    try:
+        return abuse.simulate(body.config, body.question, body.repeats, body.interval_s)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from None
+
+
+@router.post("/abuse/unlock")
+def abuse_unlock(body: ClientBody):
+    ok = abuse.unlock(body.client)
+    if ok:
+        db.audit("abuse.unlock", body.client, "ปลดล็อกด้วยมือ")
+    return {"ok": ok}
+
+
+@router.post("/abuse/reset")
+def abuse_reset():
+    abuse.reset()
+    db.audit("abuse.reset", "all", "ล้างสถานะและแคช")
+    return {"ok": True}
 
 
 # ====================================================================== ขอบเขตการตอบ
@@ -819,8 +883,8 @@ def eval_update_prompt(prompt_id: str, body: PromptPatch):
 
 
 async def _ask_like_production(model: str, text: str, system: str, context: str = "") -> dict:
-    """ถามแบบเดียวกับตอนใช้งานจริง (0.8.2): ด่านขอบเขต → ค้นคลังความรู้ → แนบข้อมูลอ้างอิง → เรียกโมเดล
-    คืนรูปแบบเดียวกับ ollama_client.chat เพิ่ม guard (ถ้าตอบตายตัวโดยไม่เรียกโมเดล) และ sources (ชื่อเอกสารที่ดึงมา)"""
+    """ถามแบบเดียวกับตอนใช้งานจริง: ด่านขอบเขต → ค้นคลังความรู้ → แนบข้อมูลอ้างอิง → เรียกโมเดล → ตรวจเลขในคำตอบ
+    คืนรูปแบบเดียวกับ ollama_client.chat เพิ่ม guard (ถ้าตอบตายตัวหรือถูกแก้) sources (ชื่อเอกสาร) top_score (คะแนนค้นสูงสุด ไว้ตั้งค่าขั้นต่ำ)"""
     decision = guard.check_rules(text)
     hits: list[dict] = []
     if not decision and context:
@@ -829,13 +893,20 @@ async def _ask_like_production(model: str, text: str, system: str, context: str 
     elif not decision:
         hits = (await kb.search(text)).get("hits", [])
         decision = guard.check_context(text, hits, True)
+    top = max((h["score"] for h in hits), default=None)
     if decision:
-        return {"reply": decision["reply"], "guard": decision["kind"], "sources": [h["title"] for h in hits]}
+        return {"reply": decision["reply"], "guard": decision["kind"], "sources": [h["title"] for h in hits], "top_score": top}
     ctx = kb.build_context(hits)
     sysmsg = f"{system}\n\n{ctx}".strip() if ctx else system
     msgs = ([{"role": "system", "content": sysmsg}] if sysmsg else []) + [{"role": "user", "content": text}]
     r = await ollama_client.chat(model, msgs)
     r["sources"] = [h["title"] for h in hits]
+    r["top_score"] = top
+    if "reply" in r:
+        bad = guard.verify_numbers(r["reply"], [h["text"] for h in hits])
+        if bad:
+            r["reply_original"] = r["reply"]
+            r["reply"], r["guard"] = bad["reply"], bad["kind"]
     return r
 
 
@@ -864,7 +935,8 @@ async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False, prog
             "rating": None, "red_flag": bool(prompt.get("red_flag")), "error": err,
             "passed": chk["passed"], "missing": chk["missing"], "violated": chk["violated"],
             "total_s": r.get("total_s"), "tokens_per_s": r.get("tokens_per_s"),
-            "guard": r.get("guard"), "sources": r.get("sources"),
+            "guard": r.get("guard"), "sources": r.get("sources"), "top_score": r.get("top_score"),
+            "reply_original": r.get("reply_original"),
             "category": prompt.get("category", ""), "expect": prompt.get("expect", []), "must_not": prompt.get("must_not", []),
         })
         if progress:
@@ -902,7 +974,7 @@ def build_compare(models: list[str], ids: list[str], runs: dict, use_kb: bool) -
             if res:
                 row.update({"prompt_text": res["prompt_text"], "red_flag": res["red_flag"], "category": res.get("category", ""),
                             "expect": res.get("expect", []), "must_not": res.get("must_not", [])})
-                row["answers"][m] = {k: res.get(k) for k in ("response", "passed", "missing", "violated", "total_s", "tokens_per_s", "guard", "sources")}
+                row["answers"][m] = {k: res.get(k) for k in ("response", "passed", "missing", "violated", "total_s", "tokens_per_s", "guard", "sources", "top_score", "reply_original")}
         if row["answers"]:
             rows.append(row)
     return {"models": list(runs), "rows": rows,

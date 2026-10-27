@@ -18,6 +18,7 @@ import System from "./pages/System";
 import Scope from "./pages/Scope";
 import Api from "./pages/Api";
 import Glossary from "./pages/Glossary";
+import Abuse from "./pages/Abuse";
 import Hub from "./components/Hub";
 
 // หน้ารวมหลายแท็บ: เส้นทางเดิมของแต่ละหน้ายังใช้ได้ (ลิงก์/บุ๊กมาร์กเก่าไม่เสีย) แต่ใช้หัวเรื่องและแท็บชุดเดียวกัน
@@ -28,6 +29,7 @@ const MODEL_TABS = [
 ];
 const CONTROL_TABS = [
   { to: "/scope", label: "ขอบเขตการตอบ", hint: "ตอบอะไรได้ ตอบอะไรไม่ได้ เคสอันตราย" },
+  { to: "/abuse", label: "ป้องกันถามซ้ำ/สแปม", hint: "จำกัดคนที่ถามซ้ำหรือยิงถี่ เพื่อไม่ให้เปลืองทรัพยากร" },
   { to: "/connect", label: "เชื่อมต่อระบบอื่น (API)", hint: "คีย์ API ให้เว็บ/LINE เรียกใช้" },
 ];
 const SYSTEM_TABS = [
@@ -58,6 +60,7 @@ export default function App() {
             <Route path="/playground" element={<Playground />} />
             <Route path="/registry" element={modelsHub(<Registry />)} />
             <Route path="/scope" element={controlHub(<Scope />)} />
+            <Route path="/abuse" element={controlHub(<Abuse />)} />
             <Route path="/connect" element={controlHub(<Api />)} />
             <Route path="/datasets" element={<Datasets />} />
             <Route path="/system" element={systemHub(<System />)} />

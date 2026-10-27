@@ -6,9 +6,13 @@
      และหัวข้อต้องห้าม เช่น วินิจฉัยโรค/แนะนำยา → ตอบข้อความตายตัว ไม่ผ่านโมเดลเลย
   2. คุยทั่วไป (smalltalk): ทักทาย/ถามตัวตนสั้นๆ ผ่านไปให้โมเดลตอบได้แม้ไม่มีเอกสาร
   3. ต้องมีเอกสารรองรับ (require_context): ถ้าเปิดใช้คลังความรู้แต่ค้นไม่เจอชิ้นที่คะแนนถึงเกณฑ์ → ตอบ "ไม่มีข้อมูล" ทันที
+  4. ตรวจเลขหลังโมเดลตอบ (verify_numbers, 0.8.5): ถ้าคำตอบมีเบอร์โทร/เวลา/ตัวเลขที่ไม่อยู่ในเอกสารที่ดึงมา (และไม่อยู่ในรายการที่อนุญาต)
+     แปลว่าโมเดลแต่งเลขเอง → แทนที่ด้วยข้อความปลอดภัย (ตัวอย่างจริง: ตอบเบอร์ 074-123-456 ทั้งที่เอกสารบอก 074-999-123)
 ผลที่ได้เป็นข้อความตายตัวที่ผู้ดูแลอ่านและแก้เองได้ ไม่ขึ้นกับว่าโมเดลจะเดาถูกหรือไม่
 """
 from __future__ import annotations
+
+import re
 
 import config
 
@@ -34,6 +38,13 @@ DEFAULT_RULES: list[dict] = [
      "reply": "ฉันไม่สามารถแนะนำยาได้ค่ะ ควรปรึกษาแพทย์หรือเภสัชกร หากฉุกเฉินโทร 1669"},
 ]
 
+# กฎ "คำตอบสำเร็จรูป" (canned): ตอบข้อความตายตัวโดยไม่เรียกโมเดล เหมาะกับคำถามที่คำตอบไม่เปลี่ยน เช่น แนะนำตัว (โมเดลเล็กมักตอบเลอะ)
+DEFAULT_RULES.append(
+    {"id": "identity", "name": "แนะนำตัว/ทำอะไรได้บ้าง", "kind": "canned", "enabled": True,
+     "keywords": ["คุณคือใคร", "คุณเป็นใคร", "แนะนำตัว", "ทำอะไรได้บ้าง", "ช่วยอะไรได้บ้าง"],
+     "reply": "สวัสดีค่ะ ฉันเป็นผู้ช่วยตอบคำถามเบื้องต้นของโรงพยาบาล เช่น เวลาทำการ ขั้นตอนรับบริการ การนัดหมาย และข้อมูลทั่วไป "
+              "ส่วนเรื่องวินิจฉัยโรคหรือแนะนำยา ขอให้ปรึกษาแพทย์โดยตรงนะคะ"})
+
 DEFAULT_SMALLTALK = ["สวัสดี", "หวัดดี", "hello", "hi ", "ขอบคุณ", "บาย", "ลาก่อน", "คุณคือใคร", "คุณชื่อ", "ชื่ออะไร", "ทำอะไรได้", "ช่วยอะไรได้", "แนะนำตัว"]
 
 DEFAULT_SCOPE: dict = {
@@ -42,6 +53,9 @@ DEFAULT_SCOPE: dict = {
     "no_info_reply": NO_INFO_DEFAULT,
     "smalltalk_keywords": DEFAULT_SMALLTALK,
     "rules": DEFAULT_RULES,
+    "verify_numbers": True,
+    "number_whitelist": ["1669", "1323", "199", "191", "1300"],     # เลขที่โมเดลพูดได้แม้ไม่อยู่ในเอกสาร (เบอร์ฉุกเฉินทั่วไป)
+    "number_reply": "ขออภัยค่ะ ตัวเลขในคำตอบยังยืนยันกับเอกสารของระบบไม่ได้ เพื่อความถูกต้องรบกวนสอบถามเจ้าหน้าที่โดยตรงนะคะ",
 }
 
 _MAX_RULES = 40
@@ -73,8 +87,8 @@ def validate_scope(raw: dict) -> dict:
         if not isinstance(r, dict):
             raise ValueError(f"กฎข้อที่ {i} ผิดรูปแบบ")
         kind = r.get("kind")
-        if kind not in ("red_flag", "blocked"):
-            raise ValueError(f"กฎข้อที่ {i}: ชนิดต้องเป็นเคสอันตราย (red_flag) หรือหัวข้อต้องห้าม (blocked)")
+        if kind not in ("red_flag", "blocked", "canned"):
+            raise ValueError(f"กฎข้อที่ {i}: ชนิดต้องเป็นเคสอันตราย (red_flag) หัวข้อต้องห้าม (blocked) หรือคำตอบสำเร็จรูป (canned)")
         kws = [str(k).strip() for k in (r.get("keywords") or []) if str(k).strip()]
         if not kws:
             raise ValueError(f"กฎข้อที่ {i}: ต้องมีคำสำคัญอย่างน้อย 1 คำ")
@@ -91,8 +105,12 @@ def validate_scope(raw: dict) -> dict:
     if len(rules) > _MAX_RULES:
         raise ValueError(f"กฎมากเกิน {_MAX_RULES} ข้อ")
     talk = [str(k).strip() for k in (raw.get("smalltalk_keywords") or []) if str(k).strip()]
+    wl = [re.sub(r"\s+", "", str(x)) for x in (raw.get("number_whitelist", DEFAULT_SCOPE["number_whitelist"]) or []) if str(x).strip()]
+    nreply = str(raw.get("number_reply") or "").strip() or DEFAULT_SCOPE["number_reply"]
     return {"enabled": bool(raw.get("enabled", True)), "require_context": bool(raw.get("require_context", True)),
-            "no_info_reply": reply[:_MAX_TEXT], "smalltalk_keywords": list(dict.fromkeys(talk))[:_MAX_KEYWORDS], "rules": rules}
+            "no_info_reply": reply[:_MAX_TEXT], "smalltalk_keywords": list(dict.fromkeys(talk))[:_MAX_KEYWORDS], "rules": rules,
+            "verify_numbers": bool(raw.get("verify_numbers", True)), "number_whitelist": list(dict.fromkeys(wl))[:60],
+            "number_reply": nreply[:_MAX_TEXT]}
 
 
 def check_rules(message: str, scope: dict | None = None) -> dict | None:
@@ -101,7 +119,7 @@ def check_rules(message: str, scope: dict | None = None) -> dict | None:
     if not sc.get("enabled"):
         return None
     m = _norm(message)
-    for want in ("red_flag", "blocked"):
+    for want in ("red_flag", "blocked", "canned"):
         for r in sc.get("rules", []):
             if r.get("kind") != want or not r.get("enabled", True):
                 continue
@@ -125,3 +143,35 @@ def check_context(message: str, hits: list, use_kb: bool, scope: dict | None = N
     if is_smalltalk(message, sc):
         return None
     return {"kind": "no_context", "rule_id": "no-context", "rule_name": "ไม่พบเอกสารที่เกี่ยวข้อง", "reply": sc["no_info_reply"]}
+
+
+# ---------------------------------------------------------------- ด่าน 4: ตรวจเลขในคำตอบกับเอกสาร (0.8.5)
+# เบอร์โทร (074-999-123) / เวลา (08.00, 16:30) / ตัวเลขยาว 3 หลักขึ้นไป (ช่วงสั้นๆ เช่น 7-14 วัน ไม่ตรวจ เพราะกำกวมเกินไป)
+_NUM_RE = re.compile(r"\d{2,4}(?:-\d{2,4}){1,3}|\d{1,2}[.:]\d{2}|\d{3,}")
+
+
+def extract_numbers(text: str) -> list[str]:
+    return list(dict.fromkeys(m.group().replace(" ", "") for m in _NUM_RE.finditer(text or "")))
+
+
+def _digits(x: str) -> str:
+    return re.sub(r"\D", "", x)
+
+
+def verify_numbers(answer: str, doc_texts: list[str], scope: dict | None = None) -> dict | None:
+    """คืน {kind:'unverified_number', numbers:[...], reply} ถ้าคำตอบมีเลขที่ไม่อยู่ในเอกสาร/รายการอนุญาต; ปกติ/ปิดใช้ = None
+    ไม่มีเอกสาร (doc_texts ว่าง) = ตรวจไม่ได้ จึงไม่ตัดสิน"""
+    sc = scope or get_scope()
+    if not sc.get("enabled") or not sc.get("verify_numbers") or not doc_texts:
+        return None
+    allowed_digits: set[str] = {_digits(w) for w in sc.get("number_whitelist", [])}
+    for r in sc.get("rules", []):                         # เบอร์ที่เราเขียนเองในคำตอบตายตัวถือว่าอนุญาต
+        allowed_digits |= {_digits(n) for n in extract_numbers(r.get("reply", ""))}
+    allowed_digits |= {_digits(n) for n in extract_numbers(sc.get("no_info_reply", ""))}
+    blob = " ".join(doc_texts)
+    doc_digits = {_digits(n) for n in extract_numbers(blob)}
+    bad = [n for n in extract_numbers(answer) if n not in blob and _digits(n) not in doc_digits and _digits(n) not in allowed_digits]
+    if not bad:
+        return None
+    return {"kind": "unverified_number", "rule_id": "verify-numbers", "rule_name": "เลขในคำตอบไม่อยู่ในเอกสาร", "numbers": bad,
+            "reply": sc.get("number_reply") or DEFAULT_SCOPE["number_reply"]}

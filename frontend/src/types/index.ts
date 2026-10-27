@@ -294,6 +294,8 @@ export interface CompareAnswer {
   tokens_per_s?: number | null;
   guard?: string | null;       // ด่านขอบเขตที่ตอบแทนโมเดล (ถ้ามี)
   sources?: string[] | null;   // ชื่อเอกสารที่ดึงมา (โหมดมีคลังความรู้)
+  top_score?: number | null;   // คะแนนความเกี่ยวข้องสูงสุดของเอกสารที่ค้นเจอ (0.8.5) ไว้ตั้ง kb_min_score
+  reply_original?: string | null;   // คำตอบเดิมของโมเดลก่อนถูกแก้เพราะเลขไม่ตรงเอกสาร
 }
 
 export interface CompareRow {

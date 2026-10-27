@@ -47,6 +47,18 @@ function loadSaved(): Partial<Saved> {
   }
 }
 
+/** ชื่อเรียกชนิดการตอบตามขอบเขต (ใช้แสดงใต้ข้อความ) */
+export function guardLabel(g: string): string {
+  if (g.startsWith("red_flag")) return "เคสอันตราย";
+  if (g.startsWith("blocked")) return "หัวข้อต้องห้าม";
+  if (g.startsWith("canned")) return "คำตอบสำเร็จรูป";
+  if (g.startsWith("unverified_number")) return "เลขไม่ตรงเอกสาร";
+  if (g.startsWith("abuse_warn")) return "ถามซ้ำหลายครั้ง";
+  if (g.startsWith("abuse_block")) return "พักการใช้งานชั่วคราว";
+  if (g.startsWith("abuse_cached")) return "ใช้คำตอบเดิม";
+  return "ไม่พบเอกสารที่เกี่ยวข้อง";
+}
+
 export default function Playground() {
   const saved = useRef<Partial<Saved>>(loadSaved()).current;
   const [models, setModels] = useState<string[]>([]);
@@ -118,6 +130,7 @@ export default function Playground() {
         (ev) => {
           if (ev.type === "sources") patchLast((m) => ({ ...m, hits: ev.hits, mode: ev.mode, note: ev.note, guard: ev.guard ? `${ev.guard.kind}|${ev.guard.rule}` : undefined }));
           else if (ev.type === "delta") patchLast((m) => ({ ...m, content: m.content + ev.text }));
+          else if (ev.type === "replace") patchLast((m) => ({ ...m, content: ev.text, guard: `${ev.guard}|verify-numbers` }));   // เลขในคำตอบไม่ตรงเอกสาร → แทนที่ด้วยข้อความปลอดภัย
           else if (ev.type === "error") patchLast((m) => ({ ...m, content: m.content || ev.error, error: true }));
           else if (ev.type === "done") {
             const parts: string[] = [];
@@ -196,7 +209,7 @@ export default function Playground() {
               </div>
               {m.role === "assistant" && (m.hits || m.stats) && (
                 <div className="space-y-1.5">
-                  {m.guard && <div className="text-[11px] text-warn">ตอบตามขอบเขตที่ตั้งไว้ ({m.guard.startsWith("red_flag") ? "เคสอันตราย" : m.guard.startsWith("blocked") ? "หัวข้อต้องห้าม" : "ไม่พบเอกสารที่เกี่ยวข้อง"}) ไม่ได้ผ่านโมเดล</div>}
+                  {m.guard && <div className="text-[11px] text-warn">ตอบตามขอบเขตที่ตั้งไว้ ({guardLabel(m.guard)}){m.guard.startsWith("unverified_number") ? " แทนที่คำตอบของโมเดลแล้ว" : " ไม่ได้ผ่านโมเดล"}</div>}
                   {m.stats && <div className="text-[11px] text-base-500">{m.stats}</div>}
                   {m.mode && m.mode !== "off" && (
                     <details className="text-xs">

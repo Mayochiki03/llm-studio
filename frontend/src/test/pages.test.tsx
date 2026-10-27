@@ -6,7 +6,7 @@ import { MemoryRouter } from "react-router-dom";
 import App from "../App";
 import { installFetch, jsonRes, ndjson, type Routes } from "./mockApi";
 
-const ROUTES = ["/", "/train", "/import", "/eval", "/models", "/kb", "/playground", "/registry", "/datasets", "/system", "/settings", "/scope", "/connect", "/glossary", "/jobs/abc"];
+const ROUTES = ["/", "/train", "/import", "/eval", "/models", "/kb", "/playground", "/registry", "/datasets", "/system", "/settings", "/scope", "/abuse", "/connect", "/glossary", "/jobs/abc"];
 const CRASH = "หน้านี้แสดงผลไม่ได้";
 
 async function open(path: string) {

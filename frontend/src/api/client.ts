@@ -114,8 +114,25 @@ export async function downloadFile(path: string, filename: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
 }
 
-export interface ScopeRule { id: string; name: string; kind: "red_flag" | "blocked"; enabled: boolean; keywords: string[]; reply: string }
-export interface ScopeConfig { enabled: boolean; require_context: boolean; no_info_reply: string; smalltalk_keywords: string[]; rules: ScopeRule[] }
+export interface ScopeRule { id: string; name: string; kind: "red_flag" | "blocked" | "canned"; enabled: boolean; keywords: string[]; reply: string }
+export interface ScopeConfig {
+  enabled: boolean; require_context: boolean; no_info_reply: string; smalltalk_keywords: string[]; rules: ScopeRule[];
+  verify_numbers: boolean; number_whitelist: string[]; number_reply: string;   // 0.8.5 ตรวจเลขในคำตอบกับเอกสาร
+}
+/** ตั้งค่ากันถามซ้ำ/สแปม (0.8.5) — เกณฑ์ "ถามซ้ำเกินกี่ครั้ง" นับจำนวนครั้งที่ผ่านมาแล้ว (ครั้งถัดไปจึงเข้าขั้น) */
+export interface AbuseConfig {
+  enabled: boolean; preset: string; window_s: number; cache_after: number; warn_after: number; block_after: number;
+  cooldown_s: number[]; strike_decay_s: number; rate_per_min: number; max_chars: number; exempt_playground: boolean; cache_ttl_s: number;
+  warn_reply: string; block_reply: string; rate_reply: string; long_reply: string;
+}
+export interface AbusePreset { label: string; hint: string; cache_after: number; warn_after: number; block_after: number; cooldown_s: number[]; rate_per_min: number }
+export interface AbuseStatus {
+  cooling: { client: string; retry_after: number; strikes: number }[]; clients: number; cache_size: number;
+  counters: Record<"allow" | "cached" | "warn" | "block" | "rate" | "long", number>;
+  events: { client: string; action: string; reason: string; len: number; hash: string; count: number; age_s: number }[];
+}
+export interface AbuseSimRow { n: number; at_s: number; action: "allow" | "cached" | "warn" | "block"; reason: string; retry_after: number; count: number }
+export interface AbuseSimResult { rows: AbuseSimRow[]; model_calls: number; saved: number; total: number }
 export interface ScopeState { scope: ScopeConfig; default: ScopeConfig; kb_min_score: number; kb_top_k: number; default_system_prompt: string }
 export interface ScopeTestResult { decision: { kind: string; rule_name: string; reply: string } | null; hits: { title: string; score: number }[]; smalltalk?: boolean }
 
@@ -255,6 +272,12 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   settings: () => req<Settings>("/settings"),
   scope: () => req<ScopeState>("/scope"),
   saveScope: (b: { scope: ScopeConfig; kb_min_score: number; kb_top_k: number; default_system_prompt: string }) => put<ScopeState>("/scope", b),
+  abuse: () => req<{ config: AbuseConfig; default: AbuseConfig; presets: Record<string, AbusePreset>; status: AbuseStatus }>("/abuse"),
+  saveAbuse: (cfg: Partial<AbuseConfig>) => put<{ config: AbuseConfig }>("/abuse", cfg),
+  abuseSimulate: (config: Partial<AbuseConfig>, question: string, repeats: number, interval_s: number) =>
+    post<AbuseSimResult>("/abuse/simulate", { config, question, repeats, interval_s }),
+  abuseUnlock: (client: string) => post<{ ok: boolean }>("/abuse/unlock", { client }),
+  abuseReset: () => post<{ ok: boolean }>("/abuse/reset", {}),
   scopeTest: (message: string, use_kb = true) => post<ScopeTestResult>("/scope/test", { message, use_kb }),
   saveSettings: (patch: Partial<Settings>) => put<Settings>("/settings", patch),
 

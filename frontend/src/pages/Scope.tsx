@@ -1,7 +1,7 @@
 // ขอบเขตการตอบ: ตั้งว่าระบบ "ควรตอบเอง / ตอบตายตัว / บอกว่าไม่มีข้อมูล" เมื่อไหร่ แก้ได้ทันทีโดยไม่ต้องเทรนใหม่
 // ใช้กับทั้งหน้า "ลองคุย" และ API ที่ระบบอื่นเรียก (กฎเดียวกัน) — ตรรกะอยู่ที่ backend/guard.py
 import { useEffect, useState } from "react";
-import { Plus, Trash2, Save, RotateCcw, FlaskConical, ShieldAlert, Ban } from "lucide-react";
+import { Plus, Trash2, Save, RotateCcw, FlaskConical, ShieldAlert, Ban, MessageSquareQuote } from "lucide-react";
 import Topbar from "../components/Topbar";
 import { Card, CardHeader } from "../components/Card";
 import Button from "../components/Button";
@@ -15,7 +15,7 @@ export function splitWords(text: string): string[] {
 }
 
 const newRule = (kind: ScopeRule["kind"]): ScopeRule => ({
-  id: `rule-${Date.now().toString(36)}`, name: kind === "red_flag" ? "เคสอันตรายใหม่" : "หัวข้อต้องห้ามใหม่", kind, enabled: true, keywords: [], reply: "",
+  id: `rule-${Date.now().toString(36)}`, name: kind === "red_flag" ? "เคสอันตรายใหม่" : kind === "canned" ? "คำตอบสำเร็จรูปใหม่" : "หัวข้อต้องห้ามใหม่", kind, enabled: true, keywords: [], reply: "",
 });
 
 export default function Scope() {
@@ -28,6 +28,7 @@ export default function Scope() {
   const [saving, setSaving] = useState(false);
   const [kwText, setKwText] = useState<Record<string, string>>({});   // ข้อความคำสำคัญที่กำลังพิมพ์ต่อกฎ (เก็บดิบไว้ให้พิมพ์ comma ได้ลื่น)
   const [talkText, setTalkText] = useState("");
+  const [wlText, setWlText] = useState("");    // รายการเลขที่อนุญาต (พิมพ์ดิบ)
   const [probe, setProbe] = useState("");
   const [probeRes, setProbeRes] = useState<ScopeTestResult | null>(null);
 
@@ -35,6 +36,7 @@ export default function Scope() {
     setCfg(r.scope); setDef(r.default); setMinScore(r.kb_min_score); setTopK(r.kb_top_k); setSys(r.default_system_prompt);
     setKwText(Object.fromEntries(r.scope.rules.map((x) => [x.id, x.keywords.join(", ")])));
     setTalkText(r.scope.smalltalk_keywords.join(", "));
+    setWlText((r.scope.number_whitelist ?? []).join(", "));
     setDirty(false);
   }).catch((e) => toast(errText(e), "bad"));
   useEffect(() => { load(); }, []);
@@ -49,10 +51,11 @@ export default function Scope() {
     setSaving(true);
     try {
       const rules = cfg.rules.map((r) => ({ ...r, keywords: splitWords(kwText[r.id] ?? r.keywords.join(", ")) }));
-      const r = await api.saveScope({ scope: { ...cfg, rules, smalltalk_keywords: splitWords(talkText) }, kb_min_score: minScore, kb_top_k: topK, default_system_prompt: sys });
+      const r = await api.saveScope({ scope: { ...cfg, rules, smalltalk_keywords: splitWords(talkText), number_whitelist: splitWords(wlText) }, kb_min_score: minScore, kb_top_k: topK, default_system_prompt: sys });
       setCfg(r.scope);
       setKwText(Object.fromEntries(r.scope.rules.map((x) => [x.id, x.keywords.join(", ")])));
       setTalkText(r.scope.smalltalk_keywords.join(", "));
+      setWlText((r.scope.number_whitelist ?? []).join(", "));
       setDirty(false);
       toast("บันทึกขอบเขตแล้ว มีผลทันที ไม่ต้องรีสตาร์ท");
     } catch (e) { toast(errText(e), "bad"); } finally { setSaving(false); }
@@ -67,6 +70,7 @@ export default function Scope() {
     setCfg(def);
     setKwText(Object.fromEntries(def.rules.map((x) => [x.id, x.keywords.join(", ")])));
     setTalkText(def.smalltalk_keywords.join(", "));
+    setWlText((def.number_whitelist ?? []).join(", "));
     setDirty(true);
   }
 
@@ -88,13 +92,14 @@ export default function Scope() {
 
   const red = cfg.rules.filter((r) => r.kind === "red_flag");
   const blocked = cfg.rules.filter((r) => r.kind === "blocked");
+  const canned = cfg.rules.filter((r) => r.kind === "canned");
 
   return (
     <div className="flex-1 overflow-y-auto">
       <Topbar title="ขอบเขตการตอบ" subtitle="กำหนดว่าระบบตอบอะไรได้ ตอบอะไรไม่ได้ แก้ได้ทันทีโดยไม่ต้องเทรนใหม่" />
       <div className="p-4 md:p-8 max-w-3xl space-y-5">
         <Notice tone="info">
-          ลำดับการตัดสินก่อนถึงโมเดล: ① ตรงกับ <b>เคสอันตราย</b> หรือ <b>หัวข้อต้องห้าม</b> → ตอบข้อความที่เขียนไว้ทันที ② ทักทาย/ถามชื่อ → ให้โมเดลตอบ ③ ค้นคลังความรู้ไม่เจอเอกสารที่เกี่ยวข้อง → ตอบ "ไม่มีข้อมูล" ④ นอกนั้นให้โมเดลตอบจากเอกสารที่ค้นเจอ
+          ลำดับการตัดสินก่อนถึงโมเดล: ① ตรงกับ <b>เคสอันตราย</b> หรือ <b>หัวข้อต้องห้าม</b> → ตอบข้อความที่เขียนไว้ทันที ② ตรงกับ <b>คำตอบสำเร็จรูป</b> (เช่น แนะนำตัว) → ตอบข้อความที่เขียนไว้ ③ ทักทาย/ถามชื่อ → ให้โมเดลตอบ ④ ค้นคลังความรู้ไม่เจอเอกสารที่เกี่ยวข้อง → ตอบ "ไม่มีข้อมูล" ⑤ นอกนั้นให้โมเดลตอบจากเอกสารที่ค้นเจอ แล้วตรวจเลขในคำตอบกับเอกสารอีกชั้น
           ใช้กฎชุดเดียวกันทั้งหน้า "ลองคุยกับโมเดล" และ API ที่ระบบอื่นเรียก
         </Notice>
 
@@ -137,6 +142,26 @@ export default function Scope() {
         </Card>
 
         <Card>
+          <CardHeader title="คำตอบสำเร็จรูป" subtitle="คำถามที่คำตอบไม่เปลี่ยน เช่น แนะนำตัว ทำอะไรได้บ้าง ตอบข้อความตายตัวโดยไม่เรียกโมเดล (โมเดลเล็กมักตอบเลอะ) เคสอันตรายและหัวข้อต้องห้ามมาก่อนเสมอ" />
+          <div className="px-5 pb-5 space-y-3">
+            {canned.length === 0 && <div className="text-sm text-base-500 flex items-center gap-2"><MessageSquareQuote size={15} /> ยังไม่มีคำตอบสำเร็จรูป</div>}
+            {canned.map((r) => <RuleBox key={r.id} r={r} />)}
+            <Button variant="secondary" className="text-xs py-1.5" onClick={() => { const r = newRule("canned"); edit({ rules: [...cfg.rules, r] }); setKwText({ ...kwText, [r.id]: "" }); }}><Plus size={13} /> เพิ่มคำตอบสำเร็จรูป</Button>
+          </div>
+        </Card>
+
+        <Card>
+          <CardHeader title="ตรวจเลขในคำตอบ" subtitle="เบอร์โทร เวลา ตัวเลข ที่โมเดลตอบต้องมีอยู่ในเอกสารที่ค้นมา ถ้าแต่งเลขเอง จะถูกแทนที่ด้วยข้อความปลอดภัย" />
+          <div className="px-5 pb-5 space-y-4">
+            <Toggle checked={cfg.verify_numbers} onChange={(v) => edit({ verify_numbers: v })} label="เปิดตรวจเลขหลังโมเดลตอบ" hint="ตรวจเฉพาะตอนใช้คลังความรู้และมีเอกสารที่ค้นเจอ ใช้ได้ทั้งหน้าลองคุยและ API" />
+            <Field label="เลขที่อนุญาตเสมอ (คั่นด้วย comma)" hint="เช่น เบอร์ฉุกเฉินทั่วไป 1669, 1323 ที่โมเดลพูดได้แม้ไม่อยู่ในเอกสาร">
+              <TextInput value={wlText} onChange={(e) => { setWlText(e.target.value); setDirty(true); }} />
+            </Field>
+            <Field label="ข้อความที่ใช้แทนเมื่อเลขไม่ตรง"><TextArea rows={2} value={cfg.number_reply} onChange={(e) => edit({ number_reply: e.target.value })} /></Field>
+          </div>
+        </Card>
+
+        <Card>
           <CardHeader title="คุยทั่วไป (ไม่ต้องมีเอกสาร)" subtitle="ข้อความสั้นที่มีคำเหล่านี้ เช่น ทักทาย ขอบคุณ ถามชื่อ จะผ่านไปให้โมเดลตอบได้" />
           <div className="px-5 pb-5">
             <TextArea rows={2} value={talkText} onChange={(e) => { setTalkText(e.target.value); setDirty(true); }} />
@@ -153,8 +178,8 @@ export default function Scope() {
             {probeRes && (
               <div className="text-sm space-y-2">
                 {probeRes.decision ? (
-                  <Notice tone={probeRes.decision.kind === "red_flag" ? "bad" : "warn"}>
-                    <b>{probeRes.decision.kind === "red_flag" ? "เคสอันตราย" : probeRes.decision.kind === "blocked" ? "หัวข้อต้องห้าม" : "ไม่พบเอกสารที่เกี่ยวข้อง"}</b> ({probeRes.decision.rule_name}) ตอบทันทีว่า: {probeRes.decision.reply}
+                  <Notice tone={probeRes.decision.kind === "red_flag" ? "bad" : probeRes.decision.kind === "canned" ? "info" : "warn"}>
+                    <b>{probeRes.decision.kind === "red_flag" ? "เคสอันตราย" : probeRes.decision.kind === "blocked" ? "หัวข้อต้องห้าม" : probeRes.decision.kind === "canned" ? "คำตอบสำเร็จรูป" : "ไม่พบเอกสารที่เกี่ยวข้อง"}</b> ({probeRes.decision.rule_name}) ตอบทันทีว่า: {probeRes.decision.reply}
                   </Notice>
                 ) : (
                   <Notice tone="good">ผ่านไปให้โมเดลตอบ{probeRes.smalltalk ? " (เป็นการคุยทั่วไป)" : ""}</Notice>
