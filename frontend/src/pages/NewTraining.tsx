@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useNavigate, useLocation, Link } from "react-router-dom";
 import Topbar from "../components/Topbar";
 import { Card } from "../components/Card";
 import Button from "../components/Button";
@@ -47,6 +47,8 @@ export function checkOutputName(name: string, used: string[]): string {
 
 export default function NewTraining() {
   const nav = useNavigate();
+  // เทรนซ้ำจากการ์ดโมเดล: ค่าเดิมส่งมาทาง router state (ใช้แทนพรีเซ็ต แล้วเปิดโหมดละเอียดให้เห็นค่า)
+  const retrain = (useLocation().state as { retrain?: Record<string, unknown> } | null)?.retrain;
   const [step, setStep] = useState(0);
   const [baseModels, setBaseModels] = useState<BaseModel[]>([]);
   const [datasets, setDatasets] = useState<DatasetOption[]>([]);
@@ -124,9 +126,24 @@ export default function NewTraining() {
     setPacking(false);
   }
 
+  function applyRetrain(x: Record<string, unknown>) {
+    const n = (k: string, d: number) => (typeof x[k] === "number" ? (x[k] as number) : d);
+    setBaseModel(String(x.base_model ?? ""));
+    setDataset(String(x.dataset ?? ""));
+    setOutputName(String(x.output_name ?? "my-model-lora"));
+    setR(n("r", 32)); setLoraAlpha(n("lora_alpha", 32)); setMaxSeqLength(n("max_seq_length", 512));
+    setEpochs(n("num_train_epochs", 2)); setSampleSize(n("sample_size", 2000)); setLr(n("learning_rate", 2e-4));
+    setBatchSize(n("batch_size", 0)); setGradAccum(n("grad_accum", 0)); setValRatio(n("val_ratio", 0.1));
+    setPacking(Boolean(x.packing)); setTemplateMode(x.template_mode === "legacy" ? "legacy" : "auto");
+    setSystemPrompt(String(x.system_prompt ?? "")); setMaxMinutes(n("max_minutes", 0));
+    setMode("adv");
+  }
+
   // ตั้งค่าเริ่มต้นตามการ์ดจอครั้งเดียวหลังรู้ VRAM
   useEffect(() => {
-    if (hw) applyPreset("faq");
+    if (!hw) return;
+    if (retrain) { applyRetrain(retrain); return; }
+    applyPreset("faq");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hw]);
 

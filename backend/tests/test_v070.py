@@ -11,7 +11,7 @@ FACTS = [{"topic": "เวลา", "answer": "เปิด 08.00-16.00 น.", "k
 
 
 def test_ขยายสำนวนและกันข้อสอบ():
-    r = faqbuilder.build(FACTS, include_defaults=False)
+    r = faqbuilder.build(FACTS, include_defaults=False, extra_eval=False)
     assert r["stats"]["eval"] == 1 and r["eval"][0]["text"] == "ปิดกี่โมง"
     assert all(t["instruction"] != "ปิดกี่โมง" for t in r["train"])
     assert len(r["train"]) == 3 * 2
@@ -36,16 +36,20 @@ def test_แพ็ก2ครบและข้อสอบผ่านคำต�
     facts = json.loads((load_sample_pack.PACK2_DIR / "facts.json").read_text(encoding="utf-8"))
     r = faqbuilder.build(facts)
     train_q = {t["instruction"] for t in r["train"]}
-    assert r["stats"]["eval"] == 26 and r["stats"]["train"] > 250  # 16 ข้อสอบจากข้อเท็จจริง + 2 ข้อสอบทั่วไป + 8 ข้อสอบนอกขอบเขต
+    # 16 จากข้อเท็จจริง + 2 ทั่วไป + 8 นอกขอบเขต + 22 ข้อสอบเพิ่ม (0.8.3) + ข้อสอบเอกสารขัดความจำ
+    assert r["stats"]["eval"] == 52 and r["stats"]["train"] > 250 and r["stats"]["conflict_eval"] == 4
     for p in r["eval"]:
+        if p.get("context"):  # ข้อสอบเอกสารขัดความจำ: คำตอบที่คาดคือเลขใหม่ ไม่ได้อยู่ในชุดเทรนโดยตั้งใจ
+            assert all(e in p["context"] for e in p["expect"]) and not any(m in p["context"] for m in p["must_not"])
+            continue
         assert p["text"] not in train_q
         assert any(evalx.check_reply(p, t["output"])["passed"] for t in r["train"]), p["text"]
 
 
 def test_โหลดแพ็ก2เข้าระบบ():
     res = load_sample_pack.load_pack2(reset=True, kb=True)
-    assert res["examples"] > 250 and res["prompts"] == 26 and res["kb_docs"] == 16
-    assert len(store.list_prompts()) == 26
+    assert res["examples"] > 250 and res["prompts"] == 52 and res["kb_docs"] == 16
+    assert len(store.list_prompts()) == 52
     assert len([d for d in store.list_datasets() if d.get("kind") == "custom"]) == 1
 
 

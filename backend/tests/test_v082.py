@@ -162,3 +162,74 @@ def test_run_eval_use_kb_applies_guard(monkeypatch):
     assert by["อยากตายจะทำยังไงดี"]["guard"] == "red_flag"
     assert by["เปิดกี่โมง"]["sources"] == ["เอกสาร"]
     assert len(calls) == 1 and "เปิด 08.00 น." in calls[0][0]["content"]  # แนบเอกสารใน system
+
+
+# ---------------------------------------------------------------- 0.8.3: การ์ดโมเดล / ข้อสอบเอกสารขัดความจำ
+def test_next_name():
+    import modelcard
+    assert modelcard.next_name("faq-v5") == "faq-v6"
+    assert modelcard.next_name("faq-v5:latest") == "faq-v6"
+    assert modelcard.next_name("faq-v9.latest") == "faq-v10"
+    assert modelcard.next_name("chatbot") == "chatbot-v2"
+
+
+def test_conflict_eval_and_context_prompt(monkeypatch):
+    """ข้อสอบเอกสารขัดความจำ: แนบเอกสารที่เปลี่ยนเลข โมเดลต้องตอบเลขใหม่; ไม่ค้นคลังจริง"""
+    import asyncio
+    import api_studio
+    import faqbuilder
+    import ollama_client
+    facts = [{"topic": "เบอร์", "questions": ["ขอเบอร์", "เบอร์โทร", "โทรหาที่ไหน"], "answer": "โทร 074-999-123", "keywords": ["074-999-123"]},
+             {"topic": "sos", "questions": ["ช่วยด้วย"], "answer": "โทร 1323", "keywords": ["1323"], "red_flag": True}]
+    cs = faqbuilder._conflict_evals(facts)
+    assert len(cs) == 1 and cs[0]["expect"] == ["074-999-124"] and cs[0]["must_not"] == ["074-999-123"]  # red flag ไม่ถูกเปลี่ยนเลข
+    seen = {}
+
+    async def fake_chat(model, messages, *a, **k):
+        seen["sys"] = messages[0]["content"]
+        return {"reply": "โทร 074-999-124", "total_s": 0.1, "tokens_per_s": 9}
+
+    async def boom(*a, **k):
+        raise AssertionError("ต้องไม่ค้นคลังจริงเมื่อมี context")
+
+    monkeypatch.setattr(ollama_client, "chat", fake_chat)
+    monkeypatch.setattr(api_studio.kb, "search", boom)
+    p = cs[0]
+    api_studio.store.add_prompt(p["text"], p["category"], p["expect"], p["must_not"], False, False, p["context"])
+    pid = [x["id"] for x in api_studio.store.list_prompts() if x["text"] == p["text"]][0]
+    run = asyncio.run(api_studio.run_eval("m", [pid], True))
+    assert run["results"][0]["passed"] is True and "074-999-124" in seen["sys"]
+
+
+def test_model_card_endpoint():
+    from fastapi.testclient import TestClient
+    import main
+    import registry
+    c = TestClient(main.app)
+    v = registry.register("card-test-v1", "base/x", job_id="", dataset_id="custom-x", dataset_version="2", notes="รุ่นทดสอบ")
+    r = c.get(f"/api/registry/{v['id']}/card")
+    assert r.status_code == 200
+    j = r.json()
+    assert j["dataset"] == {"id": "custom-x", "version": "2"} and j["job"] is None and j["retrain"] is None
+    assert "scope_hash" in j["environment_now"] and j["version"]["notes"] == "รุ่นทดสอบ"
+    assert c.get("/api/registry/nope/card").status_code == 404
+
+
+def test_model_card_with_job_gives_retrain_values():
+    """มีงานเทรนต้นทาง: การ์ดคืนค่าเทรนจริง + ค่า retrain (ชื่อใหม่) ที่ส่งเข้า POST /api/jobs ได้ตรงๆ"""
+    import modelcard
+    import registry
+    from jobs import Job, manager
+    j = Job(id="jcard1", base_model="unsloth/x", dataset="custom-d1", output_name="faq-v5", r=16, lora_alpha=16,
+            max_seq_length=512, num_train_epochs=4, sample_size=2000, learning_rate=1e-4, val_ratio=0.1, dataset_version=1)
+    j.loss_points = [{"step": 10, "loss": 1.0}, {"step": 10, "loss": None, "val_loss": 0.5}, {"step": 20, "loss": 0.2, "val_loss": 0.3}]
+    manager.jobs["jcard1"] = j
+    try:
+        v = registry.register("faq-v5", "unsloth/x", job_id="jcard1", dataset_id="custom-d1", dataset_version="1")
+        card = modelcard.build(v["id"])
+        assert card["job"]["r"] == 16 and card["job"]["final_val_loss"] == 0.3 and card["job"]["best_val_loss"] == 0.3
+        assert card["retrain"]["output_name"] == "faq-v6" and card["retrain"]["num_train_epochs"] == 4
+        from main import CreateJobRequest
+        CreateJobRequest(**card["retrain"])  # ต้องเป็นค่าที่ API สร้างงานรับได้จริง
+    finally:
+        manager.jobs.pop("jcard1", None)

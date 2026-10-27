@@ -20,7 +20,7 @@ import type {
   KbHistory,
   DatasetVersion,
   PiiScan,
-  ModelVersion,
+  ModelVersion, ModelCard,
   ModelEvent,
   CompareResult,
   DiskInfo,
@@ -366,7 +366,8 @@ exportGguf: (id: string, quantization = "q4_k_m") =>
   registryRollback: () => post<ModelVersion>("/registry/rollback"),
   registryNotes: (id: string, notes: string) => put<ModelVersion>(`/registry/${id}/notes`, { notes }),
   registryDelete: (id: string) => del<{ ok: boolean }>(`/registry/${id}`),
-  registryEval: (id: string) => post<ModelVersion>(`/registry/${id}/eval`),
+  registryEval: (id: string, use_kb = false) => post<ModelVersion>(`/registry/${id}/eval${use_kb ? "?use_kb=true" : ""}`),
+  registryCard: (id: string) => req<ModelCard>(`/registry/${id}/card`),
 
   // ระบบ
   disk: () => req<DiskInfo>("/system/disk"),

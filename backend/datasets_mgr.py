@@ -287,7 +287,7 @@ def from_facts(label: str, notes: str, facts: list[dict], augment: bool = True,
         have = {p["text"] for p in store.list_prompts()}
         for p in r["eval"]:
             if p["text"] not in have:
-                store.add_prompt(p["text"], p["category"], p["expect"], p["must_not"], p["red_flag"], p["pinned"])
+                store.add_prompt(p["text"], p["category"], p["expect"], p["must_not"], p["red_flag"], p["pinned"], p.get("context", ""))
                 added += 1
     return {"dataset_id": res["dataset_id"], "examples": res["count"], "pii": res.get("pii"),
             "eval_added": added, "stats": r["stats"]}

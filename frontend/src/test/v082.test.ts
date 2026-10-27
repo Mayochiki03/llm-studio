@@ -40,3 +40,23 @@ describe("คำศัพท์", () => {
     for (const w of ["RAG", "LoRA", "โมเดลที่ใช้งานจริง"]) expect(words).toContain(w);
   });
 });
+
+import { cardToText } from "../components/ModelCardDialog";
+import type { ModelCard } from "../types";
+
+describe("cardToText (0.8.3)", () => {
+  const card = {
+    version: { id: "a", name: "faq-v5", base_model: "typhoon", status: "candidate", notes: "เพิ่มข้อมูลนอกขอบเขต", created_at: 0, updated_at: 0 },
+    dataset: { id: "custom-1", version: "2" },
+    job: { r: 16, lora_alpha: 16, max_seq_length: 512, num_train_epochs: 4, learning_rate: 0.0001, val_ratio: 0.1, final_train_loss: 0.07, final_val_loss: 0.25, best_val_loss: 0.24 },
+    eval: { pass_rate: 0.96, red_flag_recall: 1, use_kb: true },
+    environment_now: {}, events: [], retrain: null,
+  } as unknown as ModelCard;
+  it("สรุปค่าสำคัญครบ พร้อมบอกว่าทดสอบแบบมีคลังความรู้", () => {
+    const t = cardToText(card);
+    for (const w of ["faq-v5", "custom-1 v2", "epochs=4", "0.250", "มีคลังความรู้", "เพิ่มข้อมูลนอกขอบเขต"]) expect(t).toContain(w);
+  });
+  it("โมเดลที่ไม่มีงานเทรนยังสรุปได้ ไม่ error", () => {
+    expect(cardToText({ ...card, job: null })).toContain("faq-v5");
+  });
+});

@@ -29,6 +29,7 @@ import hardware
 import kb
 import kbtests
 import logs
+import modelcard
 import ollama_client
 import preflight
 import registry
@@ -223,6 +224,7 @@ class QABody(BaseModel):
 class DocPatch(BaseModel):
     title: str | None = None
     text: str | None = None
+    context: str | None = None
     category: str | None = None
     tags: list[str] | None = None
     enabled: bool | None = None
@@ -814,12 +816,15 @@ def eval_update_prompt(prompt_id: str, body: PromptPatch):
     return store.update_prompt(prompt_id, body.model_dump())
 
 
-async def _ask_like_production(model: str, text: str, system: str) -> dict:
+async def _ask_like_production(model: str, text: str, system: str, context: str = "") -> dict:
     """ถามแบบเดียวกับตอนใช้งานจริง (0.8.2): ด่านขอบเขต → ค้นคลังความรู้ → แนบข้อมูลอ้างอิง → เรียกโมเดล
     คืนรูปแบบเดียวกับ ollama_client.chat เพิ่ม guard (ถ้าตอบตายตัวโดยไม่เรียกโมเดล) และ sources (ชื่อเอกสารที่ดึงมา)"""
     decision = guard.check_rules(text)
     hits: list[dict] = []
-    if not decision:
+    if not decision and context:
+        # ข้อสอบ "เอกสารขัดความจำ": ใช้เอกสารที่กำหนดแทนผลค้นหา (ไม่ค้นคลังจริง)
+        hits = [{"title": "เอกสารทดสอบ", "text": re.sub(r"^ข้อมูลอ้างอิง:\n\[1\] \([^)]*\) ", "", context), "score": 1.0}]
+    elif not decision:
         hits = (await kb.search(text)).get("hits", [])
         decision = guard.check_context(text, hits, True)
     if decision:
@@ -844,7 +849,7 @@ async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> d
         if not prompt:
             continue
         if use_kb:
-            r = await _ask_like_production(model, prompt["text"], system)
+            r = await _ask_like_production(model, prompt["text"], system, prompt.get("context", ""))
         else:
             r = await ollama_client.chat(model, [{"role": "user", "content": prompt["text"]}])
         err = "error" in r
@@ -858,6 +863,7 @@ async def run_eval(model: str, prompt_ids: list[str], use_kb: bool = False) -> d
             "guard": r.get("guard"), "sources": r.get("sources"),
         })
     run = {"id": run_id, "model": model, "created_at": time.time(), "results": results, "use_kb": use_kb,
+           "environment": modelcard.environment_snapshot() if use_kb else None,
            "summary": evalx.summarize(results)}
     store.save_run(run)
     return run
@@ -905,8 +911,17 @@ async def eval_compare(body: CompareBody):
             "run_ids": {m: r["id"] for m, r in runs.items()}, "use_kb": body.use_kb}
 
 
+@router.get("/registry/{vid}/card")
+def registry_card(vid: str):
+    """การ์ดประจำโมเดล: ค่าเทรน ชุดข้อมูล ผลทดสอบ สภาพคลังความรู้/ขอบเขต และค่าสำหรับเทรนซ้ำ (modelcard.py)"""
+    c = modelcard.build(vid)
+    if not c:
+        raise HTTPException(404, "ไม่พบเวอร์ชันนี้")
+    return c
+
+
 @router.post("/registry/{vid}/eval")
-async def registry_eval(vid: str, prompt_ids: list[str] | None = None):
+async def registry_eval(vid: str, prompt_ids: list[str] | None = None, use_kb: bool = False):
     """ทดสอบเวอร์ชันนี้ด้วยโจทย์ที่ตรึงไว้ (และเคส red flag) แล้วแนบผลสรุปเข้าทะเบียน"""
     v = registry.get(vid)
     if not v:
@@ -914,8 +929,9 @@ async def registry_eval(vid: str, prompt_ids: list[str] | None = None):
     ids = _select_prompts(prompt_ids or [], True)
     if not ids:
         raise HTTPException(400, "ยังไม่มีโจทย์ที่ตรึงไว้ ไปตรึงโจทย์ในหน้าทดสอบก่อน")
-    run = await run_eval(v["name"], ids)
-    summary = {**run["summary"], "run_id": run["id"], "at": run["created_at"]}
+    run = await run_eval(v["name"], ids, use_kb)
+    summary = {**run["summary"], "run_id": run["id"], "at": run["created_at"], "use_kb": run.get("use_kb", False),
+               "n_prompts": len(run["results"])}
     return registry.attach_eval(vid, summary)
 
 

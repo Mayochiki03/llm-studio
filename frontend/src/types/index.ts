@@ -384,3 +384,24 @@ export interface PiiGate {
   samples: { type: string; sample: string }[];
   message: string;
 }
+
+/** การ์ดประจำโมเดล (0.8.3): ทุกอย่างที่ต้องรู้เพื่อทำซ้ำ/เทียบ/ย้อนกลับโมเดลรุ่นหนึ่ง */
+export interface ModelCard {
+  version: { id: string; name: string; base_model: string; status: string; notes: string; created_at: number; updated_at: number };
+  dataset: { id: string; version: string };
+  job: null | {
+    id: string; output_name: string; status: string; started_at: number | null; finished_at: number | null;
+    base_model: string; dataset: string; dataset_version: number; r: number; lora_alpha: number; max_seq_length: number;
+    num_train_epochs: number; sample_size: number; learning_rate: number; batch_size: number; grad_accum: number;
+    val_ratio: number; packing: boolean; template_mode: string; system_prompt: string; preset: string;
+    train_config: Record<string, unknown>;
+    final_train_loss: number | null; final_val_loss: number | null; best_val_loss: number | null;
+  };
+  eval: { pass_rate?: number | null; red_flag_recall?: number | null; count?: number; n_prompts?: number; at?: number; use_kb?: boolean };
+  environment_now: {
+    kb_docs: number; kb_enabled: number; kb_last_update: number | null; kb_min_score: number; kb_top_k: number;
+    system_prompt_chars: number; scope_hash: string;
+  };
+  events: { id: number; ts: number; event: string; detail: string }[];
+  retrain: null | Record<string, unknown>;
+}

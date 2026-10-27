@@ -254,10 +254,11 @@ def list_prompts() -> list[dict]:
 
 
 def add_prompt(text: str, category: str, expect: list[str] | None = None, must_not: list[str] | None = None,
-               red_flag: bool = False, pinned: bool = False) -> list[dict]:
+               red_flag: bool = False, pinned: bool = False, context: str = "") -> list[dict]:
     prompts = list_prompts()
     prompts.append({"id": uuid.uuid4().hex[:8], "text": text, "category": category or "ทั่วไป",
-                    "expect": expect or [], "must_not": must_not or [], "red_flag": red_flag, "pinned": pinned})
+                    "expect": expect or [], "must_not": must_not or [], "red_flag": red_flag, "pinned": pinned,
+                    "context": context})  # context = เอกสารที่ต้องแนบแทนผลค้นหา (ข้อสอบ "เอกสารขัดความจำ")
     _save(PROMPTS_FILE, prompts)
     return prompts
 
@@ -267,7 +268,7 @@ def update_prompt(prompt_id: str, patch: dict) -> list[dict]:
     prompts = list_prompts()
     for p in prompts:
         if p["id"] == prompt_id:
-            for k in ("text", "category", "expect", "must_not", "red_flag", "pinned"):
+            for k in ("text", "category", "expect", "must_not", "red_flag", "pinned", "context"):
                 if k in patch and patch[k] is not None:
                     p[k] = patch[k]
     _save(PROMPTS_FILE, prompts)

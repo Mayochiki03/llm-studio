@@ -1,6 +1,6 @@
 // ทะเบียนโมเดล: ทุกโมเดลที่สร้างจะเข้ามาเป็น "รอตรวจ" → ทดสอบ → อนุมัติ → ใช้งานจริง (ทีละตัว) ย้อนกลับได้
 import { useCallback, useEffect, useState } from "react";
-import { ShieldCheck, CheckCircle2, Rocket, Archive, RotateCcw, Trash2, FlaskConical, Plus, StickyNote, History } from "lucide-react";
+import { ShieldCheck, CheckCircle2, Rocket, Archive, RotateCcw, Trash2, FlaskConical, Plus, StickyNote, History, IdCard } from "lucide-react";
 import Topbar from "../components/Topbar";
 import { Card } from "../components/Card";
 import Button from "../components/Button";
@@ -8,6 +8,7 @@ import { Empty, Field, Modal, Notice, Pill, Spinner, TextArea, TextInput, fmtDat
 import { toast, errText } from "../components/toast";
 import { api } from "../api/client";
 import type { ModelEvent, ModelVersion } from "../types";
+import ModelCardDialog from "../components/ModelCardDialog";
 
 const STATUS: Record<string, { label: string; tone: Tone }> = {
   candidate: { label: "รอตรวจ", tone: "mute" },
@@ -34,6 +35,7 @@ export default function Registry() {
   const [adding, setAdding] = useState(false);
   const [notesFor, setNotesFor] = useState<ModelVersion | null>(null);
   const [eventsFor, setEventsFor] = useState<ModelVersion | null>(null);
+  const [cardFor, setCardFor] = useState<ModelVersion | null>(null);
   const [showArchived, setShowArchived] = useState(false);
 
   const load = useCallback(() => api.registry().then(setList).catch((e) => toast(errText(e), "bad")), []);
@@ -136,6 +138,7 @@ export default function Registry() {
                         <Rocket size={13} /> เปิดใช้งานจริง
                       </Button>
                     )}
+                    <Button variant="ghost" className="text-xs py-1.5" onClick={() => setCardFor(v)}><IdCard size={13} /> การ์ดโมเดล</Button>
                     <Button variant="ghost" className="text-xs py-1.5" onClick={() => setNotesFor(v)}><StickyNote size={13} /> บันทึก</Button>
                     <Button variant="ghost" className="text-xs py-1.5" onClick={() => setEventsFor(v)}><History size={13} /> ประวัติ</Button>
                     {v.status !== "active" && v.status !== "archived" && (
@@ -155,6 +158,7 @@ export default function Registry() {
 
       {adding && <AddDialog onClose={() => setAdding(false)} onDone={() => { setAdding(false); load(); }} />}
       {notesFor && <NotesDialog v={notesFor} onClose={() => setNotesFor(null)} onDone={() => { setNotesFor(null); load(); }} />}
+      {cardFor && <ModelCardDialog v={cardFor} onClose={() => setCardFor(null)} />}
       {eventsFor && <EventsDialog v={eventsFor} onClose={() => setEventsFor(null)} />}
     </div>
   );
